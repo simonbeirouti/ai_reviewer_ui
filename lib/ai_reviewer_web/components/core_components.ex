@@ -16,6 +16,7 @@ defmodule AiReviewerWeb.CoreComponents do
   """
   use Phoenix.Component
   use Gettext, backend: AiReviewerWeb.Gettext
+  import Phoenix.HTML, only: [raw: 1]
 
   alias Phoenix.LiveView.JS
 
@@ -597,6 +598,14 @@ defmodule AiReviewerWeb.CoreComponents do
     """
   end
 
+  def icon(%{name: "hero-chevron-down-solid"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class}>
+      <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do
@@ -672,5 +681,180 @@ defmodule AiReviewerWeb.CoreComponents do
   """
   def translate_errors(errors, field) when is_list(errors) do
     for {^field, {msg, opts}} <- errors, do: translate_error({msg, opts})
+  end
+
+  @doc """
+  Renders a formatted code diff with line numbers and syntax highlighting.
+
+  ## Examples
+
+      <.format_diff diff={diff_content} />
+  """
+  attr :diff, :string, required: true
+
+  def format_diff(assigns) do
+    ~H"""
+    <div class="font-mono text-sm overflow-x-auto">
+      <table class="w-full border-collapse">
+        <tbody>
+          <%= for line <- format_diff_lines(@diff) do %>
+            <%= if line.type == :hidden do %>
+              <tr class={diff_line_class(line)}>
+                <td colspan="3" class="py-1"><%= line.content %></td>
+              </tr>
+            <% else %>
+              <tr class={diff_line_class(line)}>
+                <td class="px-2 py-0.5 text-right text-gray-500 select-none border-r border-gray-200 w-[50px]">
+                  <%= if line.old_num do %><%= line.old_num %><% end %>
+                </td>
+                <td class="px-2 py-0.5 text-right text-gray-500 select-none border-r border-gray-200 w-[50px]">
+                  <%= if line.new_num do %><%= line.new_num %><% end %>
+                </td>
+                <td class="px-4 py-0.5 whitespace-pre"><%= line.content %></td>
+              </tr>
+            <% end %>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+    """
+  end
+
+  defp format_diff_lines(diff) do
+    lines = diff |> String.split("\n")
+
+    # Parse all lines and collect line info
+    # Now the headers are already converted to hidden lines in parse_diff_line
+    parsed_lines =
+      lines
+      |> Enum.reduce({[], 0, 0}, fn line, {acc, old_line, new_line} ->
+        {line_info, next_old, next_new} = parse_diff_line(line, old_line, new_line)
+        {[line_info | acc], next_old, next_new}
+      end)
+      |> elem(0)
+      |> Enum.reverse()
+
+    # Check for gaps in line numbering and add hidden lines where needed
+    {result, _, _} =
+      parsed_lines
+      |> Enum.reduce({[], nil, nil}, fn line, {acc, prev_old, prev_new} ->
+        cond do
+          # First line in the diff
+          is_nil(prev_old) or is_nil(prev_new) ->
+            {[line | acc], line.old_num, line.new_num}
+
+          # For normal lines, check for gaps in numbering
+          not is_nil(line.old_num) or not is_nil(line.new_num) ->
+            current_old = line.old_num
+            current_new = line.new_num
+
+            # Only add a gap indicator if:
+            # 1. It's not already a hidden line
+            # 2. There's an actual gap
+            # 3. Previous lines weren't hidden lines (to avoid duplicates)
+            if line.type != :hidden and
+               List.first(acc) && List.first(acc).type != :hidden and
+               ((not is_nil(current_old) and not is_nil(prev_old) and current_old > prev_old + 1) or
+                (not is_nil(current_new) and not is_nil(prev_new) and current_new > prev_new + 1)) do
+              # Gap detected, insert hidden lines indicator
+              hidden_line = %{type: :hidden, content: "... no changes, hidden lines ...", old_num: nil, new_num: nil}
+              {[line, hidden_line | acc], current_old, current_new}
+            else
+              # No gap, just add the line
+              {[line | acc], current_old || prev_old, current_new || prev_new}
+            end
+
+          # Just add other lines (already hidden lines, etc.)
+          true ->
+            {[line | acc], prev_old, prev_new}
+        end
+      end)
+
+    Enum.reverse(result)
+  end
+
+  defp parse_hunk_header(header) do
+    # Parse @@ -17,6 +17,14 @@ style header
+    case Regex.run(~r/@@ -(\d+),\d+ \+(\d+),\d+ @@/, header) do
+      [_, old_start, new_start] ->
+        {String.to_integer(old_start), String.to_integer(new_start)}
+      _ ->
+        {1, 1} # Default if we can't parse
+    end
+  end
+
+  defp parse_diff_line(line, old_line, new_line) do
+    cond do
+      String.match?(line, ~r/^@@/) ->
+        # Parse the line numbers from the hunk header
+        {old_start, new_start} = parse_hunk_header(line)
+        # Replace header with hidden lines text instead
+        {%{type: :hidden, content: "... no changes, hidden lines ...", old_num: nil, new_num: nil}, old_start - 1, new_start - 1}
+
+      String.starts_with?(line, "+") ->
+        content = String.slice(line, 1..-1)
+        cond do
+          # Check if this is a commented out code line (line begins with #)
+          String.match?(String.trim_leading(content), ~r/^# /) ->
+            {%{type: :add_comment, content: content, old_num: nil, new_num: new_line + 1}, old_line, new_line + 1}
+          # Regular added line
+          true ->
+            {%{type: :add, content: content, old_num: nil, new_num: new_line + 1}, old_line, new_line + 1}
+        end
+
+      String.starts_with?(line, "-") ->
+        content = String.slice(line, 1..-1)
+        cond do
+          # Check if this is a commented out code line (line begins with #)
+          String.match?(String.trim_leading(content), ~r/^# /) ->
+            {%{type: :remove_comment, content: content, old_num: old_line + 1, new_num: nil}, old_line + 1, new_line}
+          # Regular removed line
+          true ->
+            {%{type: :remove, content: content, old_num: old_line + 1, new_num: nil}, old_line + 1, new_line}
+        end
+
+      # Standalone comment line for diff metadata (e.g. # Anti-pattern: Dogpile on with)
+      String.match?(line, ~r/^# /) ->
+        {%{type: :comment, content: line, old_num: nil, new_num: nil}, old_line, new_line}
+
+      true ->
+        # Context line
+        {%{type: :context, content: line, old_num: old_line + 1, new_num: new_line + 1}, old_line + 1, new_line + 1}
+    end
+  end
+
+  defp diff_line_class(line) do
+    case line.type do
+      :header -> "bg-gray-200"
+      :add -> "bg-green-50"
+      :remove -> "bg-red-50"
+      :add_comment -> "bg-green-50 text-gray-600"
+      :remove_comment -> "bg-red-50 text-gray-600"
+      :comment -> "bg-gray-100 text-gray-600"
+      :hidden -> "bg-gray-100 text-center text-gray-500 italic"
+      _ -> "bg-white"
+    end
+  end
+
+  @doc """
+  Renders markdown content to HTML.
+
+  ## Examples
+
+      <.markdown content={comment_body} />
+  """
+  attr :content, :string, required: true
+  attr :class, :string, default: ""
+
+  def markdown(assigns) do
+    markdown_html =
+      assigns.content
+      |> Earmark.as_html!()
+
+    assigns = assign(assigns, :markdown_html, markdown_html)
+
+    ~H"""
+    <div class={"markdown-content #{@class}"} phx-no-format><%= raw(@markdown_html) %></div>
+    """
   end
 end
