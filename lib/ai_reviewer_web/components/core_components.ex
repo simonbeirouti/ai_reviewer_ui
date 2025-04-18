@@ -16,6 +16,7 @@ defmodule AiReviewerWeb.CoreComponents do
   """
   use Phoenix.Component
   use Gettext, backend: AiReviewerWeb.Gettext
+  import Phoenix.HTML, only: [raw: 1]
 
   alias Phoenix.LiveView.JS
 
@@ -597,6 +598,14 @@ defmodule AiReviewerWeb.CoreComponents do
     """
   end
 
+  def icon(%{name: "hero-chevron-down-solid"} = assigns) do
+    ~H"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class={@class}>
+      <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
+    </svg>
+    """
+  end
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do
@@ -825,5 +834,27 @@ defmodule AiReviewerWeb.CoreComponents do
       :hidden -> "bg-gray-100 text-center text-gray-500 italic"
       _ -> "bg-white"
     end
+  end
+
+  @doc """
+  Renders markdown content to HTML.
+
+  ## Examples
+
+      <.markdown content={comment_body} />
+  """
+  attr :content, :string, required: true
+  attr :class, :string, default: ""
+
+  def markdown(assigns) do
+    markdown_html =
+      assigns.content
+      |> Earmark.as_html!()
+
+    assigns = assign(assigns, :markdown_html, markdown_html)
+
+    ~H"""
+    <div class={"markdown-content #{@class}"} phx-no-format><%= raw(@markdown_html) %></div>
+    """
   end
 end

@@ -86,6 +86,17 @@ defmodule AiReviewer.GithubService do
     end
   end
 
+  def get_pull_request_issue_comments(owner, repo, pr_number, access_token) do
+    case get("/repos/#{owner}/#{repo}/issues/#{pr_number}/comments", headers: [{"Authorization", "token #{access_token}"}]) do
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, body}
+      {:ok, %{status: status, body: body}} ->
+        {:error, "GitHub API error: #{status} - #{inspect(body)}"}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   def get_pull_request_diff(owner, repo, pr_number, access_token) do
     case get("/repos/#{owner}/#{repo}/pulls/#{pr_number}", headers: [{"Authorization", "token #{access_token}"}]) do
       {:ok, %{status: 200, body: body}} ->
