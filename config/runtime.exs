@@ -114,4 +114,12 @@ if config_env() == :prod do
   #     config :swoosh, :api_client, Swoosh.ApiClient.Hackney
   #
   # See https://hexdocs.pm/swoosh/Swoosh.html#module-installation for details.
+
+  config :ueberauth, Ueberauth.Strategy.Github.OAuth,
+    client_id: System.get_env("GITHUB_CLIENT_ID"),
+    client_secret: System.get_env("GITHUB_CLIENT_SECRET")
+
+  # OpenAI API key config
+  config :ai_reviewer,
+    openai_api_key: System.get_env("OPENAI_API_KEY")
 end
