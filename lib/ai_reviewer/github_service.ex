@@ -119,28 +119,53 @@ defmodule AiReviewer.GithubService do
     end
   end
 
+  def get_file_content(owner, repo, path, ref, access_token) do
+    url = "/repos/#{owner}/#{repo}/contents/#{path}?ref=#{ref}"
+
+    case get(url, headers: [{"Authorization", "token #{access_token}"}]) do
+      {:ok, %{status: 200, body: body}} ->
+        case body do
+          %{"content" => content, "encoding" => "base64"} ->
+            cleaned_content = String.replace(content || "", ~r/[\r\n]/, "")
+            try do
+              decoded = Base.decode64!(cleaned_content)
+              {:ok, decoded}
+            rescue
+              e ->
+                {:error, "Error decoding file content: #{inspect(e)}"}
+            end
+          _ ->
+            {:error, "Invalid response format"}
+        end
+      {:ok, %{status: status, body: body}} ->
+        {:error, "GitHub API error: #{status} - #{inspect(body)}"}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp parse_diff(diff) do
     diff
     |> String.split("\n")
     |> Enum.reduce({[], %{name: nil, chunks: []}}, fn line, {files, current_file} ->
       cond do
         String.starts_with?(line, "diff --git") ->
-          new_file = %{name: String.slice(line, 12..-1), chunks: []}
+          new_file = %{name: String.slice(line, 12..-1//1), chunks: []}
           {files ++ [current_file], new_file}
         String.starts_with?(line, "@@") ->
           new_chunk = %{header: line, lines: []}
           {files, %{current_file | chunks: current_file.chunks ++ [new_chunk]}}
         String.starts_with?(line, "+") ->
           update_current_chunk(current_file, fn chunk ->
-            %{chunk | lines: chunk.lines ++ [%{type: :add, content: String.slice(line, 1..-1)}]}
+            %{chunk | lines: chunk.lines ++ [%{type: :add, content: String.slice(line, 1..-1//1)}]}
           end)
         String.starts_with?(line, "-") ->
           update_current_chunk(current_file, fn chunk ->
-            %{chunk | lines: chunk.lines ++ [%{type: :remove, content: String.slice(line, 1..-1)}]}
+            %{chunk | lines: chunk.lines ++ [%{type: :remove, content: String.slice(line, 1..-1//1)}]}
           end)
         String.starts_with?(line, " ") ->
           update_current_chunk(current_file, fn chunk ->
-            %{chunk | lines: chunk.lines ++ [%{type: :context, content: String.slice(line, 1..-1)}]}
+            %{chunk | lines: chunk.lines ++ [%{type: :context, content: String.slice(line, 1..-1//1)}]}
           end)
         true ->
           {files, current_file}
@@ -160,6 +185,22 @@ defmodule AiReviewer.GithubService do
         updated_chunk = update_fn.(chunk)
         updated_chunks = List.replace_at(file.chunks, -1, updated_chunk)
         {[], %{file | chunks: updated_chunks}}
+    end
+  end
+
+  # Helper function to get type as string
+  defp typeof(term) do
+    cond do
+      is_nil(term) -> "nil"
+      is_binary(term) -> "binary (string)"
+      is_boolean(term) -> "boolean"
+      is_number(term) -> "number"
+      is_atom(term) -> "atom"
+      is_function(term) -> "function"
+      is_list(term) -> "list"
+      is_tuple(term) -> "tuple"
+      is_map(term) -> "map"
+      true -> "unknown"
     end
   end
 end

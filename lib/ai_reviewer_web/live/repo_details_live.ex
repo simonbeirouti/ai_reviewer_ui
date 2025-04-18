@@ -37,7 +37,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
       _ -> []
     end
 
-    {:ok, assign(socket,
+    {:ok, socket = assign(socket,
       repo: repo_data,
       branches: branches,
       pull_requests: pull_requests,
@@ -45,11 +45,22 @@ defmodule AiReviewerWeb.RepoDetailsLive do
       selected_pr: nil,
       selected_pr_data: nil,
       pr_comments: [],
-      pr_diff: nil,
+      pr_files: [],
+      base_file_contents: %{},
+      head_file_contents: %{},
+      selected_file: nil,
+      selected_line: nil,
+      editing_line: nil,
+      edited_content: "",
+      edit_suggestions: %{},
+      anti_pattern_suggestions: [],
       pr_status: "open",
       error: if(is_nil(repo_data), do: "Repository not found", else: nil),
       current_user: current_user,
-      current_path: "/dashboard/repo/#{repo_name}"
+      current_path: "/dashboard/repo/#{repo_name}",
+      is_loading_files: false,
+      debug_info: "Initialized and ready",
+      file_changes: %{}
     )}
   end
 
@@ -83,6 +94,132 @@ defmodule AiReviewerWeb.RepoDetailsLive do
     fetch_pull_request_data(pr_number, socket)
   end
 
+  def handle_event("force_refresh", %{"filename" => filename}, socket) do
+
+    if socket.assigns.selected_pr_data && socket.assigns.current_user do
+      %{github_token: token, name: username} = socket.assigns.current_user
+      pr_data = socket.assigns.selected_pr_data
+
+
+      # Directly fetch the file synchronously for debugging
+      case GithubService.get_file_content(
+        username,
+        socket.assigns.repo["name"],
+        filename,
+        pr_data["head"]["sha"],
+        token
+      ) do
+        {:ok, content} ->
+
+          head_file_contents = Map.put(socket.assigns.head_file_contents, filename, content)
+
+          {:noreply, assign(socket,
+            head_file_contents: head_file_contents,
+            is_loading_files: false,
+            debug_info: "File loaded directly: #{byte_size(content)} bytes, type: #{typeof(content)}"
+          )}
+        {:error, reason} ->
+
+          {:noreply, assign(socket,
+            is_loading_files: false,
+            debug_info: "Error: #{reason}"
+          )}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({ref, _message}, socket) when is_reference(ref) do
+    # Task completed, we don't need to do anything with the reference
+    Process.demonitor(ref, [:flush])
+    {:noreply, socket}
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, socket) do
+    # Task process went down, we can ignore this
+    {:noreply, socket}
+  end
+
+  def handle_info({:base_file_loaded, filename, content}, socket) do
+    IO.inspect({filename, byte_size(content), String.slice(content, 0..50)}, label: "Base file loaded with preview")
+    base_file_contents = Map.put(socket.assigns.base_file_contents, filename, content)
+
+    # Check if we've loaded all files
+    is_loading = check_all_files_loaded(socket.assigns.pr_files, base_file_contents, socket.assigns.head_file_contents)
+    IO.inspect(is_loading, label: "Still loading files?")
+
+    socket = socket
+      |> assign(base_file_contents: base_file_contents)
+      |> assign(is_loading_files: is_loading)
+      |> assign(debug_info: "Base file loaded: #{filename}, #{byte_size(content)} bytes")
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:head_file_loaded, filename, content}, socket) do
+    head_file_contents = Map.put(socket.assigns.head_file_contents, filename, content)
+
+    # Check if we've loaded all files
+    is_loading = check_all_files_loaded(socket.assigns.pr_files, socket.assigns.base_file_contents, head_file_contents)
+
+    socket = socket
+      |> assign(head_file_contents: head_file_contents)
+      |> assign(is_loading_files: is_loading)
+      |> assign(debug_info: "Head file loaded: #{filename}, #{byte_size(content || "")} bytes, type: #{typeof(content)}")
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:file_load_error, filename, error}, socket) do
+    IO.inspect(error, label: "Error loading file: #{filename}")
+
+    # Even if there's an error, update loading status
+    is_loading = check_all_files_loaded(socket.assigns.pr_files, socket.assigns.base_file_contents, socket.assigns.head_file_contents)
+
+    {:noreply, assign(socket, is_loading_files: is_loading)}
+  end
+
+  # Check if all files from the PR have been loaded
+  defp check_all_files_loaded(pr_files, base_contents, head_contents) do
+    if length(pr_files) == 0 do
+      false
+    else
+      # Check if we have at least the selected file loaded
+      missing_files = Enum.filter(pr_files, fn file ->
+        filename = file["filename"]
+        !Map.has_key?(head_contents, filename)
+      end)
+
+      IO.inspect(length(missing_files), label: "Number of missing files")
+      length(missing_files) > 0
+    end
+  end
+
+  defp fetch_base_file(username, repo, filename, sha, token) do
+    IO.inspect({username, repo, filename, sha}, label: "Base file details")
+    case GithubService.get_file_content(username, repo, filename, sha, token) do
+      {:ok, content} ->
+        IO.inspect({:ok, filename, byte_size(content)}, label: "Base file fetch result")
+        send(self(), {:base_file_loaded, filename, content})
+      {:error, reason} ->
+        IO.inspect({:error, filename, reason}, label: "Base file fetch error")
+        send(self(), {:file_load_error, filename, reason})
+    end
+  end
+
+  defp fetch_head_file(username, repo, filename, sha, token) do
+    IO.inspect({username, repo, filename, sha}, label: "Head file details")
+    case GithubService.get_file_content(username, repo, filename, sha, token) do
+      {:ok, content} ->
+        IO.inspect({:ok, filename, byte_size(content)}, label: "Head file fetch result")
+        send(self(), {:head_file_loaded, filename, content})
+      {:error, reason} ->
+        IO.inspect({:error, filename, reason}, label: "Head file fetch error")
+        send(self(), {:file_load_error, filename, reason})
+    end
+  end
+
   defp fetch_pull_requests_by_status(status, socket) do
     IO.inspect(status, label: "Selected PR status")
     IO.inspect(socket.assigns, label: "Current socket assigns")
@@ -109,13 +246,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
     end
   end
 
-  defp fetch_pull_request_data(pr_number, socket) when is_binary(pr_number) do
-    fetch_pull_request_data(String.to_integer(pr_number), socket)
-  end
-
   defp fetch_pull_request_data(pr_number, socket) do
-    IO.inspect(pr_number, label: "Selected PR number")
-
     case socket.assigns.current_user do
       %{github_token: token, name: username} ->
         with {:ok, review_comments} <- GithubService.get_pull_request_comments(username, socket.assigns.repo["name"], pr_number, token),
@@ -126,13 +257,49 @@ defmodule AiReviewerWeb.RepoDetailsLive do
           # Combine both types of comments
           all_comments = issue_comments ++ review_comments
 
-          {:noreply, assign(socket,
+          # Select the first file by default if there are any files
+          first_file = if length(files) > 0, do: List.first(files)["filename"], else: nil
+
+          socket = assign(socket,
             selected_pr: pr_number,
             pr_comments: all_comments,
             selected_pr_data: pr_data,
             pr_files: files,
-            repo: socket.assigns.repo
-          )}
+            base_file_contents: %{},
+            head_file_contents: %{},
+            selected_file: first_file,
+            is_loading_files: length(files) > 0,
+            debug_info: "PR #{pr_number} loaded with #{length(files)} files"
+          )
+
+          # If there are files, load them directly
+          if first_file do
+            # Immediately load the first file synchronously to ensure it's available
+            case load_file_synchronously(username, socket.assigns.repo["name"], first_file, pr_data["head"]["sha"], token) do
+              {:ok, content} ->
+                head_file_contents = Map.put(socket.assigns.head_file_contents, first_file, content)
+
+                socket = socket
+                  |> assign(head_file_contents: head_file_contents)
+                  |> assign(is_loading_files: false)
+                  |> assign(debug_info: "PR #{pr_number} loaded with #{length(files)} files. First file loaded: #{byte_size(content)} bytes")
+
+                # Then start loading other files asynchronously
+                load_remaining_files_async(socket, files, first_file)
+
+                {:noreply, socket}
+
+              {:error, reason} ->
+                socket = assign(socket, debug_info: "Error loading first file: #{inspect(reason)}")
+
+                # Still start loading other files asynchronously
+                load_remaining_files_async(socket, files, first_file)
+
+                {:noreply, socket}
+            end
+          else
+            {:noreply, socket}
+          end
         else
           error ->
             IO.inspect(error, label: "Error in PR selection")
@@ -141,6 +308,11 @@ defmodule AiReviewerWeb.RepoDetailsLive do
               pr_comments: [],
               selected_pr_data: nil,
               pr_files: [],
+              base_file_contents: %{},
+              head_file_contents: %{},
+              selected_file: nil,
+              is_loading_files: false,
+              debug_info: "Error loading PR: #{inspect(error)}",
               repo: socket.assigns.repo
             )}
         end
@@ -150,12 +322,58 @@ defmodule AiReviewerWeb.RepoDetailsLive do
           pr_comments: [],
           selected_pr_data: nil,
           pr_files: [],
+          base_file_contents: %{},
+          head_file_contents: %{},
+          selected_file: nil,
+          is_loading_files: false,
+          debug_info: "No user credentials available",
           repo: socket.assigns.repo
         )}
     end
   end
 
+  # Load a file synchronously for immediate display
+  defp load_file_synchronously(username, repo, filename, sha, token) do
+    GithubService.get_file_content(username, repo, filename, sha, token)
+  end
+
+  # Load remaining files asynchronously in the background
+  defp load_remaining_files_async(socket, files, skip_file) do
+    %{github_token: token, name: username} = socket.assigns.current_user
+    pr_data = socket.assigns.selected_pr_data
+
+    # Filter out the already loaded first file
+    remaining_files = Enum.filter(files, fn file ->
+      file["filename"] != skip_file
+    end)
+
+    Enum.each(remaining_files, fn file ->
+      filename = file["filename"]
+
+      # Base file (from base branch)
+      spawn(fn ->
+        fetch_base_file(username, socket.assigns.repo["name"], filename, pr_data["base"]["sha"], token)
+      end)
+
+      # Head file (from head branch)
+      spawn(fn ->
+        fetch_head_file(username, socket.assigns.repo["name"], filename, pr_data["head"]["sha"], token)
+      end)
+    end)
+  end
+
   def render(assigns) do
+    # Format code with line numbers if there's a selected file with content
+    formatted_code = if assigns.selected_file && Map.has_key?(assigns.head_file_contents, assigns.selected_file) do
+      content = Map.get(assigns.head_file_contents, assigns.selected_file, "")
+      format_code_with_line_numbers(content)
+    else
+      %{lines: [], count: 0}
+    end
+
+    # Add the formatted code to assigns for use in the template
+    assigns = assign(assigns, :formatted_code, formatted_code)
+
     ~H"""
     <div id="main-container" class="h-[calc(100vh-4rem)] flex flex-col">
       <!-- Top navigation bar -->
@@ -348,29 +566,181 @@ defmodule AiReviewerWeb.RepoDetailsLive do
 
             <%= if length(@pr_files) > 0 do %>
               <div class="mt-4">
-                <h4 class="text-md font-medium text-gray-700 mb-2">Changed Files</h4>
-                <div class="space-y-4">
-                  <%= for file <- @pr_files do %>
-                    <div class="bg-white border rounded-lg overflow-hidden">
-                      <div class="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">
-                        <span class="text-sm font-medium text-gray-700"><%= file["filename"] %></span>
-                        <div class="flex items-center gap-2">
-                          <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
-                            <%= file["changes"] %> changes
-                          </span>
-                          <span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">
-                            +<%= file["additions"] %>
-                          </span>
-                          <span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-800">
-                            -<%= file["deletions"] %>
-                          </span>
-                        </div>
-                      </div>
-                      <div class="p-4">
-                        <.format_diff diff={file["patch"]} />
+                <h4 class="text-md font-medium text-gray-700 mb-2">Pull Request Files</h4>
+                <div class="grid grid-cols-2 gap-4">
+                  <!-- Left Column: Changed Files -->
+                  <div class="border rounded-lg overflow-hidden">
+                    <div class="bg-gray-50 px-4 py-2 border-b">
+                      <h5 class="text-md font-medium text-gray-700">Changed Files (PR Diff)</h5>
+                    </div>
+                    <div class="p-4 overflow-y-auto max-h-[70vh]">
+                      <div class="space-y-4">
+                        <%= for file <- @pr_files do %>
+                          <div class="bg-white border rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">
+                              <span class="text-sm font-medium text-gray-700"><%= file["filename"] %></span>
+                              <div class="flex items-center gap-2">
+                                <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                                  <%= file["changes"] %> changes
+                                </span>
+                                <span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">
+                                  +<%= file["additions"] %>
+                                </span>
+                                <span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-800">
+                                  -<%= file["deletions"] %>
+                                </span>
+                              </div>
+                            </div>
+                            <div class="p-4">
+                              <%= if file["patch"] do %>
+                                <.format_diff diff={file["patch"]} />
+                              <% else %>
+                                <div class="text-gray-500 text-center py-4">No diff available</div>
+                              <% end %>
+                            </div>
+                          </div>
+                        <% end %>
                       </div>
                     </div>
-                  <% end %>
+                  </div>
+
+                  <!-- Right Column: Full Files -->
+                  <div class="border rounded-lg overflow-hidden">
+                    <div class="bg-gray-50 px-4 py-2 border-b">
+                      <h5 class="text-md font-medium text-gray-700">Full Updated File</h5>
+                    </div>
+                    <div class="p-4 overflow-y-auto max-h-[70vh]">
+                      <%= if @selected_file do %>
+                        <%= if @is_loading_files do %>
+                          <div class="text-center p-8">
+                            <div class="inline-block animate-spin mr-2 h-6 w-6 text-blue-600 border-2 rounded-full border-solid border-current border-r-transparent" role="status">
+                              <span class="sr-only">Loading...</span>
+                            </div>
+                            <p class="mt-2 text-gray-600">Loading file content...</p>
+                          </div>
+                        <% else %>
+                          <div class="bg-white border rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">
+                              <span class="text-sm font-medium text-gray-700"><%= @selected_file %></span>
+                              <div class="flex items-center gap-2">
+                                <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                                  <%= @formatted_code.count %> lines
+                                </span>
+                                <%= if Map.has_key?(@file_changes, @selected_file) do %>
+                                  <span class="text-xs px-2 py-1 rounded-full bg-yellow-100 text-yellow-800">
+                                    Modified
+                                  </span>
+                                <% end %>
+                                <button
+                                  phx-click="force_refresh"
+                                  phx-value-filename={@selected_file}
+                                  class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                >
+                                  Refresh
+                                </button>
+                              </div>
+                            </div>
+                            <div class="p-4">
+                              <!-- Code editor with line numbers -->
+                              <div class="overflow-x-auto text-sm font-mono">
+                                <table class="w-full border-collapse">
+                                  <tbody>
+                                    <%= for line <- @formatted_code.lines do %>
+                                      <tr id={line.id} class={"hover:bg-gray-100 #{if @selected_line == line.id, do: "bg-blue-50", else: ""}"}>
+                                        <td class="px-2 py-0.5 text-right text-gray-500 select-none border-r border-gray-200 bg-gray-50 w-[50px]">
+                                          <%= line.number %>
+                                        </td>
+                                        <%= if @editing_line == line.id do %>
+                                          <td class="px-0 py-0 whitespace-pre">
+                                            <div class="flex w-full">
+                                              <textarea
+                                                id="line-editor"
+                                                phx-keydown="handle_editor_keydown"
+                                                phx-blur="cancel_edit"
+                                                class="w-full font-mono text-sm p-2 border-2 border-blue-400 focus:border-blue-600 focus:outline-none"
+                                                style="min-height: 2.5em;"
+                                                phx-hook="FocusElement"
+                                                phx-update="ignore"
+                                              ><%= @edited_content %></textarea>
+                                            </div>
+                                            <div class="flex justify-end space-x-2 p-1 bg-gray-100">
+                                              <button
+                                                phx-click="save_edit"
+                                                phx-value-line={line.id}
+                                                class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+                                              >
+                                                Save
+                                              </button>
+                                              <button
+                                                phx-click="cancel_edit"
+                                                class="px-2 py-1 text-xs bg-gray-600 text-white rounded hover:bg-gray-700"
+                                              >
+                                                Cancel
+                                              </button>
+                                            </div>
+                                          </td>
+                                        <% else %>
+                                          <td
+                                            class={"px-4 py-0.5 whitespace-pre #{if Map.has_key?(@file_changes, @selected_file) && Map.has_key?(@file_changes[@selected_file], line.id), do: "bg-yellow-50", else: ""}"}
+                                            phx-click="line_click"
+                                            phx-value-line={line.id}
+                                            phx-value-file={@selected_file}
+                                            style="cursor: pointer;"
+                                            title="Click to select line"
+                                          >
+                                            <%= line.content %>
+                                            <%= if Map.has_key?(@edit_suggestions, line.id) do %>
+                                              <div class="mt-1 p-1 bg-yellow-50 border-l-4 border-yellow-400 text-xs text-gray-800">
+                                                <div class="font-semibold">Suggestion:</div>
+                                                <div class="whitespace-pre-wrap"><%= @edit_suggestions[line.id] %></div>
+                                              </div>
+                                            <% end %>
+                                          </td>
+                                        <% end %>
+                                      </tr>
+                                    <% end %>
+                                  </tbody>
+                                </table>
+                              </div>
+
+                              <!-- Action buttons for selected line -->
+                              <%= if @selected_line && @editing_line != @selected_line do %>
+                                <div class="sticky bottom-0 flex mt-2 space-x-2 p-2 bg-gray-100 border-t border-gray-200">
+                                  <button
+                                    phx-click="start_edit"
+                                    phx-value-line={@selected_line}
+                                    class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                                  >
+                                    Edit Line
+                                  </button>
+                                  <button
+                                    phx-click="suggest_edit"
+                                    phx-value-line={@selected_line}
+                                    class="px-3 py-1 text-sm bg-purple-600 text-white rounded hover:bg-purple-700"
+                                  >
+                                    Suggest Improvement
+                                  </button>
+                                  <button
+                                    phx-click="deselect_line"
+                                    class="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              <% end %>
+                            </div>
+                          </div>
+                        <% end %>
+                      <% else %>
+                        <div class="text-center p-8 text-gray-500">
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mx-auto text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          <p class="mt-2">Select a file to view its full content</p>
+                        </div>
+                      <% end %>
+                    </div>
+                  </div>
                 </div>
               </div>
             <% end %>
@@ -450,5 +820,185 @@ defmodule AiReviewerWeb.RepoDetailsLive do
       size_kb >= 1024 -> "#{Float.round(size_kb / 1024, 2)} MB"
       true -> "#{size_kb} KB"
     end
+  end
+
+  # Helper function for escaping HTML content (renamed to avoid conflicts)
+  defp escape_html(content) when is_binary(content) do
+    content
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+  end
+  defp escape_html(_), do: ""
+
+  # Helper function to get type as string
+  defp typeof(term) do
+    cond do
+      is_nil(term) -> "nil"
+      is_binary(term) -> "binary (string)"
+      is_boolean(term) -> "boolean"
+      is_number(term) -> "number"
+      is_atom(term) -> "atom"
+      is_function(term) -> "function"
+      is_list(term) -> "list"
+      is_tuple(term) -> "tuple"
+      is_map(term) -> "map"
+      true -> "unknown"
+    end
+  end
+
+  # Function to format code with line numbers
+  defp format_code_with_line_numbers(content) when is_binary(content) do
+    lines = String.split(content, ~r/\r?\n/)
+    line_count = length(lines)
+    line_number_width = String.length("#{line_count}")
+
+    formatted_lines = Enum.with_index(lines, 1)
+    |> Enum.map(fn {line, idx} ->
+      line_number = String.pad_leading("#{idx}", line_number_width)
+      %{number: line_number, content: line, id: "L#{idx}"}
+    end)
+
+    %{lines: formatted_lines, count: line_count}
+  end
+  defp format_code_with_line_numbers(_), do: %{lines: [], count: 0}
+
+  # Enhanced line click handler
+  def handle_event("line_click", %{"line" => line_id, "file" => filename}, socket) do
+
+    # Extract line number from line_id (format is "L123")
+    line_number = String.replace(line_id, "L", "")
+
+    # Find the content of the selected line
+    line_content = case socket.assigns.formatted_code.lines do
+      lines when is_list(lines) ->
+        Enum.find_value(lines, "", fn line ->
+          if line.id == line_id, do: line.content, else: nil
+        end)
+      _ -> ""
+    end
+
+    # Set the selected line in the state
+    socket = assign(socket,
+      selected_line: line_id,
+      edited_content: line_content, # Store the current content
+      debug_info: "Selected line #{line_number} in file #{filename}"
+    )
+
+    {:noreply, socket}
+  end
+
+  # Start editing a line
+  def handle_event("start_edit", %{"line" => line_id}, socket) do
+
+    # Get content for this line
+    line_content = case socket.assigns.formatted_code.lines do
+      lines when is_list(lines) ->
+        Enum.find_value(lines, "", fn line ->
+          if line.id == line_id, do: line.content, else: nil
+        end)
+      _ -> ""
+    end
+
+    {:noreply, assign(socket,
+      editing_line: line_id,
+      edited_content: line_content,
+      debug_info: "Editing line #{line_id}"
+    )}
+  end
+
+  # Cancel editing
+  def handle_event("cancel_edit", _params, socket) do
+    {:noreply, assign(socket,
+      editing_line: nil,
+      debug_info: "Editing cancelled"
+    )}
+  end
+
+  # Deselect the current line
+  def handle_event("deselect_line", _params, socket) do
+    {:noreply, assign(socket,
+      selected_line: nil,
+      editing_line: nil,
+      debug_info: "Line deselected"
+    )}
+  end
+
+  # Save the edited line
+  def handle_event("save_edit", %{"line" => line_id}, socket) do
+
+    # Get the current file
+    file = socket.assigns.selected_file
+
+    # Create or update file changes map
+    file_changes = socket.assigns.file_changes
+    file_map = Map.get(file_changes, file, %{})
+    updated_file_map = Map.put(file_map, line_id, socket.assigns.edited_content)
+    updated_changes = Map.put(file_changes, file, updated_file_map)
+
+    # Track changes for future commit
+    socket = socket
+      |> assign(file_changes: updated_changes)
+      |> assign(editing_line: nil)
+      |> assign(debug_info: "Changes to line #{line_id} saved")
+
+    {:noreply, socket}
+  end
+
+  # Handle keydown events in the editor
+  def handle_event("handle_editor_keydown", %{"key" => "Escape"}, socket) do
+    # Cancel edit on Escape key
+    {:noreply, assign(socket, editing_line: nil)}
+  end
+
+  def handle_event("handle_editor_keydown", %{"key" => "Enter", "ctrlKey" => true}, socket) do
+    # Save on Ctrl+Enter
+    line_id = socket.assigns.editing_line
+
+    {:noreply, assign(socket,
+      editing_line: nil,
+      debug_info: "Changes to line #{line_id} would be saved via Ctrl+Enter"
+    )}
+  end
+
+  def handle_event("handle_editor_keydown", _key_info, socket) do
+    # For any other key, just continue editing
+    {:noreply, socket}
+  end
+
+  # Handle form field updates for the editor
+  def handle_event("form_update", %{"editor" => %{"content" => content}}, socket) do
+    {:noreply, assign(socket, edited_content: content)}
+  end
+
+  # Generate an edit suggestion
+  def handle_event("suggest_edit", %{"line" => line_id}, socket) do
+
+    # Get content for this line
+    line_content = case socket.assigns.formatted_code.lines do
+      lines when is_list(lines) ->
+        Enum.find_value(lines, "", fn line ->
+          if line.id == line_id, do: line.content, else: nil
+        end)
+      _ -> ""
+    end
+
+    # Example suggestion (in a real app, this would come from an AI model)
+    suggestion = case line_content do
+      "" -> "No content to suggest improvements for."
+      content when byte_size(content) > 0 ->
+        if String.contains?(content, "TODO") do
+          "Consider implementing this TODO item or adding more specific details."
+        else
+          "Consider adding a comment to explain this line's purpose."
+        end
+    end
+
+    # Add suggestion to the map of suggestions
+    edit_suggestions = Map.put(socket.assigns.edit_suggestions, line_id, suggestion)
+
+    {:noreply, assign(socket,
+      edit_suggestions: edit_suggestions,
+      debug_info: "Added suggestion for line #{line_id}"
+    )}
   end
 end
