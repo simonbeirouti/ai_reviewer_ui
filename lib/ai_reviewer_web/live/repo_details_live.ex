@@ -87,11 +87,13 @@ defmodule AiReviewerWeb.RepoDetailsLive do
     case socket.assigns.current_user do
       %{github_token: token, name: username} ->
         with {:ok, comments} <- GithubService.get_pull_request_comments(username, socket.assigns.repo["name"], pr_number, token),
-             {:ok, pr_data} <- GithubService.get_pull_request_diff(username, socket.assigns.repo["name"], pr_number, token) do
+             {:ok, pr_data} <- GithubService.get_pull_request_diff(username, socket.assigns.repo["name"], pr_number, token),
+             {:ok, files} <- GithubService.get_pull_request_files(username, socket.assigns.repo["name"], pr_number, token) do
           {:noreply, assign(socket,
             selected_pr: pr_number,
             pr_comments: comments,
             selected_pr_data: pr_data,
+            pr_files: files,
             repo: socket.assigns.repo
           )}
         else
@@ -101,6 +103,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
               selected_pr: pr_number,
               pr_comments: [],
               selected_pr_data: nil,
+              pr_files: [],
               repo: socket.assigns.repo
             )}
         end
@@ -109,6 +112,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
           selected_pr: pr_number,
           pr_comments: [],
           selected_pr_data: nil,
+          pr_files: [],
           repo: socket.assigns.repo
         )}
     end
@@ -181,27 +185,6 @@ defmodule AiReviewerWeb.RepoDetailsLive do
             <% end %>
           </div>
         </div>
-
-        <%= if @selected_pr do %>
-          <div class="mt-4">
-            <h3 class="font-semibold mb-2">PR Comments</h3>
-            <div class="space-y-2">
-              <%= if length(@pr_comments) == 0 do %>
-                <div class="text-gray-500 text-center py-4">
-                  No comments found
-                </div>
-              <% else %>
-                <%= for comment <- @pr_comments do %>
-                  <div class="p-2 bg-white rounded-lg">
-                    <div class="font-medium"><%= comment["user"]["login"] %></div>
-                    <div class="text-sm text-gray-600"><%= comment["body"] %></div>
-                    <div class="text-xs text-gray-500 mt-1"><%= format_date(comment["created_at"]) %></div>
-                  </div>
-                <% end %>
-              <% end %>
-            </div>
-          </div>
-        <% end %>
       </div>
 
       <!-- Main Content -->
@@ -213,14 +196,11 @@ defmodule AiReviewerWeb.RepoDetailsLive do
         <% end %>
 
         <%= if @selected_pr_data do %>
-          <div class="bg-white shadow rounded-lg p-4 mb-4">
-            <div class="flex justify-between items-start mb-4">
+          <div class="bg-white">
+            <%!-- <div class="flex justify-between items-start mb-4">
               <div>
-                <h2 class="text-xl font-bold mb-2">
-                  <%= @selected_pr_data["title"] %>
-                </h2>
-                <div class="flex items-center gap-2 text-sm text-gray-600">
-                  <span>#<%= @selected_pr_data["number"] %></span>
+                <h3 class="text-lg font-medium text-gray-900">#<%= @selected_pr_data["number"] %> <%= @selected_pr_data["title"] %></h3>
+                <div class="flex items-center gap-2 text-sm text-gray-600 mt-1">
                   <span class={"px-2 py-1 rounded-full text-xs #{if @selected_pr_data["state"] == "open", do: "bg-green-100 text-green-800", else: "bg-red-100 text-red-800"}"}>
                     <%= String.capitalize(@selected_pr_data["state"]) %>
                   </span>
@@ -231,7 +211,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
               <a href={@selected_pr_data["html_url"]} target="_blank" class="text-blue-500 hover:underline">
                 View on GitHub
               </a>
-            </div>
+            </div> --%>
 
             <%= if @selected_pr_data["body"] do %>
               <div class="prose max-w-none mb-4">
@@ -241,56 +221,60 @@ defmodule AiReviewerWeb.RepoDetailsLive do
 
             <div class="grid grid-cols-2 gap-4 mb-4">
               <div class="bg-gray-50 p-4 rounded-lg">
-                <h3 class="font-semibold mb-2">Base Branch</h3>
-                <p class="text-sm"><%= @selected_pr_data["base"]["ref"] %></p>
+                <h4 class="text-md font-medium text-gray-700 mb-2">Base Branch</h4>
+                <p class="text-sm text-gray-600"><%= @selected_pr_data["base"]["ref"] %></p>
               </div>
               <div class="bg-gray-50 p-4 rounded-lg">
-                <h3 class="font-semibold mb-2">Head Branch</h3>
-                <p class="text-sm"><%= @selected_pr_data["head"]["ref"] %></p>
+                <h4 class="text-md font-medium text-gray-700 mb-2">Head Branch</h4>
+                <p class="text-sm text-gray-600"><%= @selected_pr_data["head"]["ref"] %></p>
               </div>
             </div>
 
-            <%= if @pr_diff && length(@pr_diff) > 0 do %>
-              <div class="space-y-8">
-                <%= for file <- @pr_diff do %>
-                  <div class="bg-white shadow rounded-lg overflow-hidden">
-                    <div class="bg-gray-100 px-4 py-2 border-b">
-                      <h3 class="font-mono text-sm"><%= file.name %></h3>
+            <%= if length(@pr_comments) > 0 do %>
+              <div class="mt-4">
+                <h4 class="text-md font-medium text-gray-700 mb-2">Comments</h4>
+                <div class="space-y-4">
+                  <%= for comment <- @pr_comments do %>
+                    <div class="bg-gray-50 p-4 rounded-lg">
+                      <div class="flex items-center gap-2 mb-2">
+                        <span class="font-medium text-gray-900"><%= comment["user"]["login"] %></span>
+                        <span class="text-sm text-gray-500"><%= format_date(comment["created_at"]) %></span>
+                      </div>
+                      <p class="text-gray-600"><%= comment["body"] %></p>
                     </div>
-                    <div class="grid grid-cols-2 divide-x">
-                      <div class="p-4">
-                        <h4 class="font-semibold mb-2">Old Version</h4>
-                        <div class="font-mono text-sm space-y-1">
-                          <%= for chunk <- file.chunks do %>
-                            <div class="mb-4">
-                              <div class="text-gray-500 mb-2"><%= chunk.header %></div>
-                              <%= for line <- chunk.lines do %>
-                                <div class={"#{if line.type == :remove, do: "bg-red-100", else: "text-gray-500"}"}>
-                                  <%= if line.type == :remove, do: "-", else: " " %><%= line.content %>
-                                </div>
-                              <% end %>
-                            </div>
-                          <% end %>
+                  <% end %>
+                </div>
+              </div>
+            <% end %>
+
+            <%= if length(@pr_files) > 0 do %>
+              <div class="mt-4">
+                <h4 class="text-md font-medium text-gray-700 mb-2">Changed Files</h4>
+                <div class="space-y-4">
+                  <%= for file <- @pr_files do %>
+                    <div class="bg-white border rounded-lg overflow-hidden">
+                      <div class="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">
+                        <span class="text-sm font-medium text-gray-700"><%= file["filename"] %></span>
+                        <div class="flex items-center gap-2">
+                          <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                            <%= file["changes"] %> changes
+                          </span>
+                          <span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">
+                            +<%= file["additions"] %>
+                          </span>
+                          <span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-800">
+                            -<%= file["deletions"] %>
+                          </span>
                         </div>
                       </div>
                       <div class="p-4">
-                        <h4 class="font-semibold mb-2">New Version</h4>
-                        <div class="font-mono text-sm space-y-1">
-                          <%= for chunk <- file.chunks do %>
-                            <div class="mb-4">
-                              <div class="text-gray-500 mb-2"><%= chunk.header %></div>
-                              <%= for line <- chunk.lines do %>
-                                <div class={"#{if line.type == :add, do: "bg-green-100", else: "text-gray-500"}"}>
-                                  <%= if line.type == :add, do: "+", else: " " %><%= line.content %>
-                                </div>
-                              <% end %>
-                            </div>
-                          <% end %>
+                        <div class="font-mono text-sm whitespace-pre overflow-x-auto">
+                          <%= file["patch"] %>
                         </div>
                       </div>
                     </div>
-                  </div>
-                <% end %>
+                  <% end %>
+                </div>
               </div>
             <% end %>
           </div>

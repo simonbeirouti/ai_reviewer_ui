@@ -97,6 +97,17 @@ defmodule AiReviewer.GithubService do
     end
   end
 
+  def get_pull_request_files(owner, repo, pr_number, access_token) do
+    case get("/repos/#{owner}/#{repo}/pulls/#{pr_number}/files", headers: [{"Authorization", "token #{access_token}"}]) do
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, body}
+      {:ok, %{status: status, body: body}} ->
+        {:error, "GitHub API error: #{status} - #{inspect(body)}"}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp parse_diff(diff) do
     diff
     |> String.split("\n")
