@@ -61,7 +61,9 @@ defmodule AiReviewer.MixProject do
       {:ueberauth, "~> 0.10"},
       {:ueberauth_github, "~> 0.8"},
       {:tesla, "~> 1.4"},
-      {:earmark, "~> 1.4"}
+      {:earmark, "~> 1.4"},
+      {:openai_ex, "~> 0.9.4"},
+      {:httpoison, "~> 2.2.2"}
     ]
   end
 

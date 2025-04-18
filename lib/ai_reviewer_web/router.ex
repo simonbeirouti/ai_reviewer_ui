@@ -36,6 +36,7 @@ defmodule AiReviewerWeb.Router do
     get "/dashboard", PageController, :dashboard
     live "/dashboard/repos", RepoSearchLive
     live "/dashboard/repo/:repo_name", RepoDetailsLive
+    live "/dashboard/patterns", PatternsLive
   end
 
   scope "/auth", AiReviewerWeb do

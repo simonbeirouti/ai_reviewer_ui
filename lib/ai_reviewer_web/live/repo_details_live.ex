@@ -2,6 +2,8 @@ defmodule AiReviewerWeb.RepoDetailsLive do
   use AiReviewerWeb, :live_view
   alias AiReviewer.GithubService
   alias AiReviewer.Accounts
+  alias AiReviewer.CodeReview
+  alias AiReviewer.AiService
   alias Phoenix.LiveView.JS
   import AiReviewerWeb.CoreComponents
 
@@ -37,7 +39,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
       _ -> []
     end
 
-    {:ok, assign(socket,
+    {:ok, socket = assign(socket,
       repo: repo_data,
       branches: branches,
       pull_requests: pull_requests,
@@ -45,11 +47,25 @@ defmodule AiReviewerWeb.RepoDetailsLive do
       selected_pr: nil,
       selected_pr_data: nil,
       pr_comments: [],
-      pr_diff: nil,
+      latest_error_comment: nil,
+      pr_files: [],
+      base_file_contents: %{},
+      head_file_contents: %{},
+      selected_file: nil,
+      selected_line: nil,
+      editing_line: nil,
+      edited_content: "",
+      edit_suggestions: %{},
+      anti_pattern_suggestions: [],
       pr_status: "open",
       error: if(is_nil(repo_data), do: "Repository not found", else: nil),
       current_user: current_user,
-      current_path: "/dashboard/repo/#{repo_name}"
+      current_path: "/dashboard/repo/#{repo_name}",
+      is_loading_files: false,
+      is_reviewing: false,
+      debug_info: "Initialized and ready",
+      file_changes: %{},
+      committed_changes: %{}
     )}
   end
 
@@ -83,6 +99,144 @@ defmodule AiReviewerWeb.RepoDetailsLive do
     fetch_pull_request_data(pr_number, socket)
   end
 
+  def handle_event("force_refresh", %{"filename" => filename}, socket) do
+
+    if socket.assigns.selected_pr_data && socket.assigns.current_user do
+      %{github_token: token, name: username} = socket.assigns.current_user
+      pr_data = socket.assigns.selected_pr_data
+
+
+      # Directly fetch the file synchronously for debugging
+      case GithubService.get_file_content(
+        username,
+        socket.assigns.repo["name"],
+        filename,
+        pr_data["head"]["sha"],
+        token
+      ) do
+        {:ok, content} ->
+
+          head_file_contents = Map.put(socket.assigns.head_file_contents, filename, content)
+
+          {:noreply, assign(socket,
+            head_file_contents: head_file_contents,
+            is_loading_files: false,
+            debug_info: "File loaded directly: #{byte_size(content)} bytes, type: #{typeof(content)}"
+          )}
+        {:error, reason} ->
+
+          {:noreply, assign(socket,
+            is_loading_files: false,
+            debug_info: "Error: #{reason}"
+          )}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({ref, _message}, socket) when is_reference(ref) do
+    # Task completed, we don't need to do anything with the reference
+    Process.demonitor(ref, [:flush])
+    {:noreply, socket}
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, socket) do
+    # Task process went down, we can ignore this
+    {:noreply, socket}
+  end
+
+  def handle_info({:base_file_loaded, filename, content}, socket) do
+    IO.inspect({filename, byte_size(content), String.slice(content, 0..50)}, label: "Base file loaded with preview")
+    base_file_contents = Map.put(socket.assigns.base_file_contents, filename, content)
+
+    # Check if we've loaded all files
+    is_loading = check_all_files_loaded(socket.assigns.pr_files, base_file_contents, socket.assigns.head_file_contents)
+    IO.inspect(is_loading, label: "Still loading files?")
+
+    socket = socket
+      |> assign(base_file_contents: base_file_contents)
+      |> assign(is_loading_files: is_loading)
+      |> assign(debug_info: "Base file loaded: #{filename}, #{byte_size(content)} bytes")
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:head_file_loaded, filename, content}, socket) do
+    head_file_contents = Map.put(socket.assigns.head_file_contents, filename, content)
+
+    # Check if we've loaded all files
+    is_loading = check_all_files_loaded(socket.assigns.pr_files, socket.assigns.base_file_contents, head_file_contents)
+
+    socket = socket
+      |> assign(head_file_contents: head_file_contents)
+      |> assign(is_loading_files: is_loading)
+      |> assign(debug_info: "Head file loaded: #{filename}, #{byte_size(content || "")} bytes, type: #{typeof(content)}")
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:file_load_error, filename, error}, socket) do
+    IO.inspect(error, label: "Error loading file: #{filename}")
+
+    # Even if there's an error, update loading status
+    is_loading = check_all_files_loaded(socket.assigns.pr_files, socket.assigns.base_file_contents, socket.assigns.head_file_contents)
+
+    {:noreply, assign(socket, is_loading_files: is_loading)}
+  end
+
+  # Check if all files from the PR have been loaded
+  defp check_all_files_loaded(pr_files, base_contents, head_contents) do
+    if length(pr_files) == 0 do
+      false
+    else
+      # Check if we have at least the selected file loaded
+      missing_files = Enum.filter(pr_files, fn file ->
+        filename = file["filename"]
+        !Map.has_key?(head_contents, filename)
+      end)
+
+      IO.inspect(length(missing_files), label: "Number of missing files")
+      length(missing_files) > 0
+    end
+  end
+
+  # Get the latest comment from the PR
+  defp get_latest_comment(comments) do
+    comments
+    |> Enum.sort_by(fn comment ->
+      case DateTime.from_iso8601(comment["created_at"]) do
+        {:ok, datetime, _} -> datetime
+        _ -> DateTime.from_unix!(0)
+      end
+    end, :desc)
+    |> List.first()
+  end
+
+  defp fetch_base_file(username, repo, filename, sha, token) do
+    IO.inspect({username, repo, filename, sha}, label: "Base file details")
+    case GithubService.get_file_content(username, repo, filename, sha, token) do
+      {:ok, content} ->
+        IO.inspect({:ok, filename, byte_size(content)}, label: "Base file fetch result")
+        send(self(), {:base_file_loaded, filename, content})
+      {:error, reason} ->
+        IO.inspect({:error, filename, reason}, label: "Base file fetch error")
+        send(self(), {:file_load_error, filename, reason})
+    end
+  end
+
+  defp fetch_head_file(username, repo, filename, sha, token) do
+    IO.inspect({username, repo, filename, sha}, label: "Head file details")
+    case GithubService.get_file_content(username, repo, filename, sha, token) do
+      {:ok, content} ->
+        IO.inspect({:ok, filename, byte_size(content)}, label: "Head file fetch result")
+        send(self(), {:head_file_loaded, filename, content})
+      {:error, reason} ->
+        IO.inspect({:error, filename, reason}, label: "Head file fetch error")
+        send(self(), {:file_load_error, filename, reason})
+    end
+  end
+
   defp fetch_pull_requests_by_status(status, socket) do
     IO.inspect(status, label: "Selected PR status")
     IO.inspect(socket.assigns, label: "Current socket assigns")
@@ -109,13 +263,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
     end
   end
 
-  defp fetch_pull_request_data(pr_number, socket) when is_binary(pr_number) do
-    fetch_pull_request_data(String.to_integer(pr_number), socket)
-  end
-
   defp fetch_pull_request_data(pr_number, socket) do
-    IO.inspect(pr_number, label: "Selected PR number")
-
     case socket.assigns.current_user do
       %{github_token: token, name: username} ->
         with {:ok, review_comments} <- GithubService.get_pull_request_comments(username, socket.assigns.repo["name"], pr_number, token),
@@ -126,13 +274,53 @@ defmodule AiReviewerWeb.RepoDetailsLive do
           # Combine both types of comments
           all_comments = issue_comments ++ review_comments
 
-          {:noreply, assign(socket,
+          # Get the latest comment for AI context
+          latest_comment = get_latest_comment(all_comments)
+
+          # Select the first file by default if there are any files
+          first_file = if length(files) > 0, do: List.first(files)["filename"], else: nil
+
+          socket = assign(socket,
             selected_pr: pr_number,
-            pr_comments: all_comments,
+            pr_comments: all_comments,  # Keep all comments for display
+            latest_error_comment: latest_comment,  # Store latest comment separately
             selected_pr_data: pr_data,
             pr_files: files,
-            repo: socket.assigns.repo
-          )}
+            base_file_contents: %{},
+            head_file_contents: %{},
+            selected_file: first_file,
+            is_loading_files: length(files) > 0,
+            debug_info: "PR #{pr_number} loaded with #{length(files)} files"
+          )
+
+          # If there are files, load them directly
+          if first_file do
+            # Immediately load the first file synchronously to ensure it's available
+            case load_file_synchronously(username, socket.assigns.repo["name"], first_file, pr_data["head"]["sha"], token) do
+              {:ok, content} ->
+                head_file_contents = Map.put(socket.assigns.head_file_contents, first_file, content)
+
+                socket = socket
+                  |> assign(head_file_contents: head_file_contents)
+                  |> assign(is_loading_files: false)
+                  |> assign(debug_info: "PR #{pr_number} loaded with #{length(files)} files. First file loaded: #{byte_size(content)} bytes")
+
+                # Then start loading other files asynchronously
+                load_remaining_files_async(socket, files, first_file)
+
+                {:noreply, socket}
+
+              {:error, reason} ->
+                socket = assign(socket, debug_info: "Error loading first file: #{inspect(reason)}")
+
+                # Still start loading other files asynchronously
+                load_remaining_files_async(socket, files, first_file)
+
+                {:noreply, socket}
+            end
+          else
+            {:noreply, socket}
+          end
         else
           error ->
             IO.inspect(error, label: "Error in PR selection")
@@ -141,6 +329,11 @@ defmodule AiReviewerWeb.RepoDetailsLive do
               pr_comments: [],
               selected_pr_data: nil,
               pr_files: [],
+              base_file_contents: %{},
+              head_file_contents: %{},
+              selected_file: nil,
+              is_loading_files: false,
+              debug_info: "Error loading PR: #{inspect(error)}",
               repo: socket.assigns.repo
             )}
         end
@@ -150,12 +343,174 @@ defmodule AiReviewerWeb.RepoDetailsLive do
           pr_comments: [],
           selected_pr_data: nil,
           pr_files: [],
+          base_file_contents: %{},
+          head_file_contents: %{},
+          selected_file: nil,
+          is_loading_files: false,
+          debug_info: "No user credentials available",
           repo: socket.assigns.repo
         )}
     end
   end
 
+  # Load a file synchronously for immediate display
+  defp load_file_synchronously(username, repo, filename, sha, token) do
+    GithubService.get_file_content(username, repo, filename, sha, token)
+  end
+
+  # Load remaining files asynchronously in the background
+  defp load_remaining_files_async(socket, files, skip_file) do
+    %{github_token: token, name: username} = socket.assigns.current_user
+    pr_data = socket.assigns.selected_pr_data
+
+    # Filter out the already loaded first file
+    remaining_files = Enum.filter(files, fn file ->
+      file["filename"] != skip_file
+    end)
+
+    Enum.each(remaining_files, fn file ->
+      filename = file["filename"]
+
+      # Base file (from base branch)
+      spawn(fn ->
+        fetch_base_file(username, socket.assigns.repo["name"], filename, pr_data["base"]["sha"], token)
+      end)
+
+      # Head file (from head branch)
+      spawn(fn ->
+        fetch_head_file(username, socket.assigns.repo["name"], filename, pr_data["head"]["sha"], token)
+      end)
+    end)
+  end
+
+  def handle_event("run_ai_review", _params, socket) do
+    case socket.assigns.selected_file do
+      nil ->
+        {:noreply, put_flash(socket, :error, "Please select a file to review")}
+      filename when is_binary(filename) ->
+        # Set loading state and log it
+        socket = assign(socket, is_reviewing: true, debug_info: "Starting AI review...")
+
+        # Capture the LiveView PID to send messages back
+        lv = self()
+
+        # Start the task but don't wait for its result
+        Task.start(fn ->
+          content = Map.get(socket.assigns.head_file_contents, filename)
+          language = get_file_language(filename)
+          anti_patterns = CodeReview.get_anti_patterns_by_language(language, socket.assigns.current_user)
+
+          # Get the latest error context if available
+          error_context = case socket.assigns.latest_error_comment do
+            nil -> ""
+            comment -> "\nPrevious error context: #{comment["body"]}"
+          end
+
+          # Log the request
+          IO.puts("Sending request to OpenAI for file: #{filename}")
+          IO.puts("Language: #{language}")
+          IO.puts("Content length: #{String.length(content)}")
+          IO.puts("Error context: #{error_context}")
+
+          case AiService.review_code(content <> error_context, anti_patterns, language) do
+            {:ok, suggestions} ->
+              # Log the response
+              IO.puts("Received AI response:")
+              IO.puts(suggestions)
+
+              # Send message back to the LiveView process
+              send(lv, {:ai_review_complete, filename, suggestions})
+
+            {:error, reason} ->
+              # Log the error
+              IO.puts("AI review error: #{inspect(reason)}")
+              send(lv, {:ai_review_error, reason})
+          end
+        end)
+
+        # Return the socket immediately with loading state
+        {:noreply, socket}
+    end
+  end
+
+  # Add handler for AI review completion
+  def handle_info({:ai_review_complete, filename, updated_code}, socket) do
+    # Log completion
+    IO.puts("Applying AI suggestions to file: #{filename}")
+
+    # Update the file contents
+    updated_contents = Map.put(socket.assigns.head_file_contents, filename, updated_code)
+
+    # Format the code with line numbers
+    formatted_code = format_code_with_line_numbers(updated_code)
+
+    # Force a temporary unselect/reselect to trigger a full refresh
+    socket = socket
+    |> assign(:selected_file, nil)
+    |> assign(:head_file_contents, updated_contents)
+    |> assign(:formatted_code, formatted_code)
+    |> assign(:file_changes, Map.put(socket.assigns.file_changes, filename, updated_code))
+
+    # Send a delayed message to reselect the file
+    Process.send_after(self(), {:reselect_file, filename}, 100)
+
+    socket = socket
+    |> assign(:is_reviewing, false)
+    |> assign(:debug_info, "AI review completed")
+    |> put_flash(:info, "AI review completed successfully")
+
+    {:noreply, socket}
+  end
+
+  # Add handler for file reselection
+  def handle_info({:reselect_file, filename}, socket) do
+    socket = assign(socket, :selected_file, filename)
+    {:noreply, socket}
+  end
+
+  # Add handler for AI review errors
+  def handle_info({:ai_review_error, reason}, socket) do
+    socket = socket
+    |> assign(:is_reviewing, false)
+    |> assign(:debug_info, "AI review failed")
+    |> put_flash(:error, "AI review failed: #{reason}")
+
+    {:noreply, socket}
+  end
+
+  defp get_file_language(filename) do
+    case Path.extname(filename) do
+      ".ex" -> "elixir"
+      ".exs" -> "elixir"
+      ".js" -> "javascript"
+      ".jsx" -> "javascript"
+      ".ts" -> "typescript"
+      ".tsx" -> "typescript"
+      ".rb" -> "ruby"
+      ".py" -> "python"
+      ".go" -> "go"
+      ".rs" -> "rust"
+      ".java" -> "java"
+      ".cpp" -> "cpp"
+      ".c" -> "c"
+      ".cs" -> "csharp"
+      ".php" -> "php"
+      _ -> "text"
+    end
+  end
+
   def render(assigns) do
+    # Format code with line numbers if there's a selected file with content
+    formatted_code = if assigns.selected_file && Map.has_key?(assigns.head_file_contents, assigns.selected_file) do
+      content = Map.get(assigns.head_file_contents, assigns.selected_file, "")
+      format_code_with_line_numbers(content)
+    else
+      %{lines: [], count: 0}
+    end
+
+    # Add the formatted code to assigns for use in the template
+    assigns = assign(assigns, :formatted_code, formatted_code)
+
     ~H"""
     <div id="main-container" class="h-[calc(100vh-4rem)] flex flex-col">
       <!-- Top navigation bar -->
@@ -348,29 +703,175 @@ defmodule AiReviewerWeb.RepoDetailsLive do
 
             <%= if length(@pr_files) > 0 do %>
               <div class="mt-4">
-                <h4 class="text-md font-medium text-gray-700 mb-2">Changed Files</h4>
-                <div class="space-y-4">
-                  <%= for file <- @pr_files do %>
-                    <div class="bg-white border rounded-lg overflow-hidden">
-                      <div class="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">
-                        <span class="text-sm font-medium text-gray-700"><%= file["filename"] %></span>
-                        <div class="flex items-center gap-2">
-                          <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
-                            <%= file["changes"] %> changes
-                          </span>
-                          <span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">
-                            +<%= file["additions"] %>
-                          </span>
-                          <span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-800">
-                            -<%= file["deletions"] %>
-                          </span>
-                        </div>
-                      </div>
-                      <div class="p-4">
-                        <.format_diff diff={file["patch"]} />
+                <div class="flex items-center justify-between mb-4">
+                  <h4 class="text-md font-medium text-gray-700 mb-2">Pull Request Files</h4>
+                  <button
+                    class="inline-flex items-center gap-2 px-4 py-2 bg-gray-800 text-white rounded-md hover:bg-gray-700"
+                    phx-click="run_ai_review"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
+                    </svg>
+                    Run AI Reviewer
+                  </button>
+                </div>
+                <div class="grid grid-cols-2 gap-4 h-full">
+                  <!-- Left Column: Changed Files -->
+                  <div class="border rounded-lg overflow-hidden">
+                    <div class="bg-gray-50 px-4 py-2 border-b">
+                      <h5 class="text-md font-medium text-gray-700">Changed Files (PR Diff)</h5>
+                    </div>
+                    <div class="p-4 overflow-y-auto h-full">
+                      <div class="space-y-4">
+                        <%= for file <- @pr_files do %>
+                          <div class="bg-white border rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">
+                              <span class="text-sm font-medium text-gray-700"><%= file["filename"] %></span>
+                              <div class="flex items-center gap-2">
+                                <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                                  <%= file["changes"] %> changes
+                                </span>
+                                <span class="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">
+                                  +<%= file["additions"] %>
+                                </span>
+                                <span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-800">
+                                  -<%= file["deletions"] %>
+                                </span>
+                              </div>
+                            </div>
+                            <div class="p-4">
+                              <%= if file["patch"] do %>
+                                <.format_diff diff={file["patch"]} />
+                              <% else %>
+                                <div class="text-gray-500 text-center py-4">No diff available</div>
+                              <% end %>
+                            </div>
+                          </div>
+                        <% end %>
                       </div>
                     </div>
-                  <% end %>
+                  </div>
+
+                  <!-- Right Column: Full Files -->
+                  <div class="border rounded-lg overflow-hidden">
+                    <div class="bg-gray-50 px-4 py-2 border-b">
+                      <h5 class="text-md font-medium text-gray-700">Full Updated File</h5>
+                    </div>
+                    <div class="p-4 overflow-y-auto h-full">
+                      <%= if @selected_file do %>
+                        <%= if @is_loading_files do %>
+                          <div class="text-center p-8">
+                            <div class="inline-block animate-spin mr-2 h-6 w-6 text-blue-600 border-2 rounded-full border-solid border-current border-r-transparent" role="status">
+                              <span class="sr-only">Loading...</span>
+                            </div>
+                            <p class="mt-2 text-gray-600">Loading file content...</p>
+                          </div>
+                        <% else %>
+                          <div class="bg-white border rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-4 py-2 border-b flex justify-between items-center">
+                              <span class="text-sm font-medium text-gray-700"><%= @selected_file %></span>
+                              <div class="flex items-center gap-2">
+                                <span class="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
+                                  <%= @formatted_code.count %> lines
+                                </span>
+                                <%= if Map.has_key?(@file_changes, @selected_file) do %>
+                                  <span class="text-xs px-2 py-1 rounded-full bg-yellow-100 text-yellow-800">
+                                    Modified
+                                  </span>
+                                <% end %>
+                                <button
+                                  phx-click="force_refresh"
+                                  phx-value-filename={@selected_file}
+                                  class="text-xs px-2 py-1 rounded-full bg-gray-200 text-gray-700 hover:bg-gray-300"
+                                >
+                                  Refresh
+                                </button>
+                              </div>
+                            </div>
+                            <div class="p-4">
+                              <div class="overflow-x-auto text-sm font-mono relative">
+                                <div class="flex">
+                                  <!-- Line numbers -->
+                                  <div class="line-numbers select-none bg-gray-50 border-r border-gray-200 p-2 text-right text-gray-500" style="min-width: 50px; margin-top: -2px;">
+                                    <%= for idx <- 1..@formatted_code.count do %>
+                                      <div class="leading-5"><%= idx %></div>
+                                    <% end %>
+                                  </div>
+                                  <!-- Code editor -->
+                                  <div class="flex-1 relative">
+                                    <%= if @selected_file do %>
+                                      <textarea
+                                        id="code-editor"
+                                        class="w-full h-full font-mono text-sm p-2 border-0 focus:ring-0 focus:outline-none whitespace-pre"
+                                        style="min-height: 200px; resize: vertical; tab-size: 2;"
+                                        spellcheck="false"
+                                        phx-hook="CodeEditor"
+                                        phx-update="ignore"
+                                        readonly
+                                      ><%= Map.get(@head_file_contents, @selected_file, "") %></textarea>
+                                    <% else %>
+                                      <div class="text-center p-8 text-gray-500">
+                                        <p>Loading...</p>
+                                      </div>
+                                    <% end %>
+                                  </div>
+                                </div>
+
+                                <!-- Action buttons -->
+                                <div class="sticky bottom-0 flex justify-between mt-2 space-x-2 p-2 bg-gray-100 border-t border-gray-200">
+                                  <%!-- <div class="flex space-x-2"> --%>
+                                    <button
+                                      phx-click="save_changes"
+                                      class="px-3 py-1 text-sm bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                                      disabled={map_size(@file_changes) == 0}
+                                    >
+                                      <div class="flex items-center">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                                        </svg>
+                                        Save Changes
+                                      </div>
+                                    </button>
+                                    <button
+                                      phx-click="discard_changes"
+                                      class="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700 disabled:opacity-50"
+                                      disabled={map_size(@file_changes) == 0}
+                                    >
+                                      <div class="flex items-center">
+                                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                        Discard Changes
+                                      </div>
+                                    </button>
+                                  <%!-- </div> --%>
+                                  <%!-- <button
+                                    phx-click="push_changes"
+                                    class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                                    disabled={map_size(@committed_changes) == 0}
+                                  >
+                                    <div class="flex items-center">
+                                      <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+                                      </svg>
+                                      Push to GitHub
+                                    </div>
+                                  </button> --%>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        <% end %>
+                      <% else %>
+                        <div class="text-center p-8 text-gray-500">
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mx-auto text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                          <p class="mt-2">Select a file to view its full content</p>
+                        </div>
+                      <% end %>
+                    </div>
+                  </div>
                 </div>
               </div>
             <% end %>
@@ -423,6 +924,17 @@ defmodule AiReviewerWeb.RepoDetailsLive do
           <% end %>
         <% end %>
       </div>
+
+      <!-- Add loading overlay -->
+      <%= if @is_reviewing do %>
+        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div class="bg-white p-8 rounded-lg shadow-lg flex flex-col items-center">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+            <p class="text-lg font-semibold">AI is reviewing your code...</p>
+            <p class="text-sm text-gray-500 mt-2">This may take a few moments</p>
+          </div>
+        </div>
+      <% end %>
     </div>
     """
   end
@@ -450,5 +962,330 @@ defmodule AiReviewerWeb.RepoDetailsLive do
       size_kb >= 1024 -> "#{Float.round(size_kb / 1024, 2)} MB"
       true -> "#{size_kb} KB"
     end
+  end
+
+  # Helper function for escaping HTML content (renamed to avoid conflicts)
+  defp escape_html(content) when is_binary(content) do
+    content
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+  end
+  defp escape_html(_), do: ""
+
+  # Helper function to get type as string
+  defp typeof(term) do
+    cond do
+      is_nil(term) -> "nil"
+      is_binary(term) -> "binary (string)"
+      is_boolean(term) -> "boolean"
+      is_number(term) -> "number"
+      is_atom(term) -> "atom"
+      is_function(term) -> "function"
+      is_list(term) -> "list"
+      is_tuple(term) -> "tuple"
+      is_map(term) -> "map"
+      true -> "unknown"
+    end
+  end
+
+  # Function to format code with line numbers
+  defp format_code_with_line_numbers(content) when is_binary(content) do
+    lines = String.split(content, ~r/\r?\n/)
+    line_count = length(lines)
+    line_number_width = String.length("#{line_count}")
+
+    formatted_lines = Enum.with_index(lines, 1)
+    |> Enum.map(fn {line, idx} ->
+      line_number = String.pad_leading("#{idx}", line_number_width)
+      %{number: line_number, content: line, id: "L#{idx}"}
+    end)
+
+    %{lines: formatted_lines, count: line_count}
+  end
+  defp format_code_with_line_numbers(_), do: %{lines: [], count: 0}
+
+  # Enhanced line click handler
+  def handle_event("line_click", %{"line" => line_id, "file" => filename}, socket) do
+
+    # Extract line number from line_id (format is "L123")
+    line_number = String.replace(line_id, "L", "")
+
+    # Find the content of the selected line
+    line_content = case socket.assigns.formatted_code.lines do
+      lines when is_list(lines) ->
+        Enum.find_value(lines, "", fn line ->
+          if line.id == line_id, do: line.content, else: nil
+        end)
+      _ -> ""
+    end
+
+    # Set the selected line in the state
+    socket = assign(socket,
+      selected_line: line_id,
+      edited_content: line_content, # Store the current content
+      debug_info: "Selected line #{line_number} in file #{filename}"
+    )
+
+    {:noreply, socket}
+  end
+
+  # Start editing a line
+  def handle_event("start_edit", %{"line" => line_id}, socket) do
+
+    # Get content for this line
+    line_content = case socket.assigns.formatted_code.lines do
+      lines when is_list(lines) ->
+        Enum.find_value(lines, "", fn line ->
+          if line.id == line_id, do: line.content, else: nil
+        end)
+      _ -> ""
+    end
+
+    {:noreply, assign(socket,
+      editing_line: line_id,
+      edited_content: line_content,
+      debug_info: "Editing line #{line_id}"
+    )}
+  end
+
+  # Cancel editing
+  def handle_event("cancel_edit", _params, socket) do
+    {:noreply, assign(socket,
+      editing_line: nil,
+      debug_info: "Editing cancelled"
+    )}
+  end
+
+  # Deselect the current line
+  def handle_event("deselect_line", _params, socket) do
+    {:noreply, assign(socket,
+      selected_line: nil,
+      editing_line: nil,
+      debug_info: "Line deselected"
+    )}
+  end
+
+  # Save the edited line
+  def handle_event("save_edit", %{"line" => line_id}, socket) do
+
+    # Get the current file
+    file = socket.assigns.selected_file
+
+    # Create or update file changes map
+    file_changes = socket.assigns.file_changes
+    file_map = Map.get(file_changes, file, %{})
+    updated_file_map = Map.put(file_map, line_id, socket.assigns.edited_content)
+    updated_changes = Map.put(file_changes, file, updated_file_map)
+
+    # Track changes for future commit
+    socket = socket
+      |> assign(file_changes: updated_changes)
+      |> assign(editing_line: nil)
+      |> assign(debug_info: "Changes to line #{line_id} saved")
+
+    {:noreply, socket}
+  end
+
+  # Handle keydown events in the editor
+  def handle_event("handle_editor_keydown", %{"key" => "Escape"}, socket) do
+    # Cancel edit on Escape key
+    {:noreply, assign(socket, editing_line: nil)}
+  end
+
+  def handle_event("handle_editor_keydown", %{"key" => "Enter", "ctrlKey" => true}, socket) do
+    # Save on Ctrl+Enter
+    line_id = socket.assigns.editing_line
+
+    {:noreply, assign(socket,
+      editing_line: nil,
+      debug_info: "Changes to line #{line_id} would be saved via Ctrl+Enter"
+    )}
+  end
+
+  def handle_event("handle_editor_keydown", _key_info, socket) do
+    # For any other key, just continue editing
+    {:noreply, socket}
+  end
+
+  # Handle form field updates for the editor
+  def handle_event("form_update", %{"editor" => %{"content" => content}}, socket) do
+    {:noreply, assign(socket, edited_content: content)}
+  end
+
+  # Generate an edit suggestion
+  def handle_event("suggest_edit", %{"line" => line_id}, socket) do
+
+    # Get content for this line
+    line_content = case socket.assigns.formatted_code.lines do
+      lines when is_list(lines) ->
+        Enum.find_value(lines, "", fn line ->
+          if line.id == line_id, do: line.content, else: nil
+        end)
+      _ -> ""
+    end
+
+    # Example suggestion (in a real app, this would come from an AI model)
+    suggestion = case line_content do
+      "" -> "No content to suggest improvements for."
+      content when byte_size(content) > 0 ->
+        if String.contains?(content, "TODO") do
+          "Consider implementing this TODO item or adding more specific details."
+        else
+          "Consider adding a comment to explain this line's purpose."
+        end
+    end
+
+    # Add suggestion to the map of suggestions
+    edit_suggestions = Map.put(socket.assigns.edit_suggestions, line_id, suggestion)
+
+    {:noreply, assign(socket,
+      edit_suggestions: edit_suggestions,
+      debug_info: "Added suggestion for line #{line_id}"
+    )}
+  end
+
+  # Handle code changes in the textarea
+  def handle_event("handle_code_change", %{"value" => content}, socket) do
+    # Split content into lines
+    lines = String.split(content, "\n")
+    line_count = length(lines)
+
+    # Create formatted lines structure
+    formatted_lines = Enum.with_index(lines, 1)
+    |> Enum.map(fn {line, idx} ->
+      %{
+        id: "L#{idx}",
+        number: "#{idx}",
+        content: line
+      }
+    end)
+
+    # Update the formatted code in socket assigns
+    {:noreply, assign(socket,
+      formatted_code: %{
+        lines: formatted_lines,
+        count: line_count
+      },
+      file_changes: Map.put(socket.assigns.file_changes, socket.assigns.selected_file, content)
+    )}
+  end
+
+  # Add handlers for save, discard, and push changes
+  def handle_event("save_changes", _params, socket) do
+    case socket.assigns.selected_file do
+      nil ->
+        {:noreply, put_flash(socket, :error, "No file selected")}
+      filename ->
+        # Get the updated content
+        updated_content = Map.get(socket.assigns.head_file_contents, filename)
+
+        # Create commit in GitHub
+        case commit_file_changes(socket, filename, updated_content) do
+          {:ok, _response} ->
+            # Move the file from file_changes to committed_changes
+            committed_changes = Map.put(
+              socket.assigns.committed_changes,
+              filename,
+              Map.get(socket.assigns.file_changes, filename)
+            )
+
+            socket = socket
+            |> put_flash(:info, "Changes saved successfully")
+            |> assign(:file_changes, Map.delete(socket.assigns.file_changes, filename))
+            |> assign(:committed_changes, committed_changes)
+            {:noreply, socket}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Failed to save changes: #{reason}")}
+        end
+    end
+  end
+
+  def handle_event("discard_changes", _params, socket) do
+    case socket.assigns.selected_file do
+      nil ->
+        {:noreply, socket}
+      filename ->
+        # Reset the file content to original
+        case get_original_file_content(socket, filename) do
+          {:ok, original_content} ->
+            socket = socket
+            |> assign(:head_file_contents, Map.put(socket.assigns.head_file_contents, filename, original_content))
+            |> assign(:file_changes, Map.delete(socket.assigns.file_changes, filename))
+            |> assign(:formatted_code, format_code_with_line_numbers(original_content))
+            |> put_flash(:info, "Changes discarded")
+
+            # Force refresh the display
+            Process.send_after(self(), {:reselect_file, filename}, 100)
+            {:noreply, assign(socket, :selected_file, nil)}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Failed to discard changes: #{reason}")}
+        end
+    end
+  end
+
+  # def handle_event("push_changes", _params, socket) do
+  #   case create_pull_request(socket) do
+  #     {:ok, pr_url} ->
+  #       socket = socket
+  #       |> assign(:committed_changes, %{})  # Clear committed changes after successful push
+  #       |> put_flash(:info, "Changes pushed successfully. PR created at #{pr_url}")
+  #       {:noreply, socket}
+  #     {:error, reason} ->
+  #       {:noreply, put_flash(socket, :error, "Failed to push changes: #{reason}")}
+  #   end
+  # end
+
+  # Helper functions for GitHub operations
+  defp commit_file_changes(socket, filename, content) do
+    %{github_token: token, name: username} = socket.assigns.current_user
+    repo_name = socket.assigns.repo["name"]
+    branch = socket.assigns.selected_pr_data["head"]["ref"]
+
+    message = "AI Review: Update #{filename}"
+
+    GithubService.commit_file(
+      username,
+      repo_name,
+      branch,
+      filename,
+      content,
+      message,
+      token
+    )
+  end
+
+  defp get_original_file_content(socket, filename) do
+    %{github_token: token, name: username} = socket.assigns.current_user
+    repo_name = socket.assigns.repo["name"]
+    sha = socket.assigns.selected_pr_data["head"]["sha"]
+
+    GithubService.get_file_content(username, repo_name, filename, sha, token)
+  end
+
+  defp create_pull_request(socket) do
+    %{github_token: token, name: username} = socket.assigns.current_user
+    repo_name = socket.assigns.repo["name"]
+    base_branch = socket.assigns.selected_pr_data["base"]["ref"]
+    head_branch = socket.assigns.selected_pr_data["head"]["ref"]
+
+    title = "AI Review: Code improvements"
+    body = """
+    This PR contains AI-suggested code improvements.
+
+    Changes made:
+    #{Enum.map_join(socket.assigns.committed_changes, "\n", fn {file, _} -> "- #{file}" end)}
+    """
+
+    GithubService.create_pull_request(
+      username,
+      repo_name,
+      title,
+      body,
+      base_branch,
+      head_branch,
+      token
+    )
   end
 end

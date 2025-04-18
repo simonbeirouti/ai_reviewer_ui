@@ -792,7 +792,7 @@ defmodule AiReviewerWeb.CoreComponents do
         {%{type: :hidden, content: "... no changes, hidden lines ...", old_num: nil, new_num: nil}, old_start - 1, new_start - 1}
 
       String.starts_with?(line, "+") ->
-        content = String.slice(line, 1..-1)
+        content = String.slice(line, 1..-1//1)
         cond do
           # Check if this is a commented out code line (line begins with #)
           String.match?(String.trim_leading(content), ~r/^# /) ->
@@ -803,7 +803,7 @@ defmodule AiReviewerWeb.CoreComponents do
         end
 
       String.starts_with?(line, "-") ->
-        content = String.slice(line, 1..-1)
+        content = String.slice(line, 1..-1//1)
         cond do
           # Check if this is a commented out code line (line begins with #)
           String.match?(String.trim_leading(content), ~r/^# /) ->
