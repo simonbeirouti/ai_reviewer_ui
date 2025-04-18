@@ -2,6 +2,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
   use AiReviewerWeb, :live_view
   alias AiReviewer.GithubService
   alias AiReviewer.Accounts
+  import AiReviewerWeb.CoreComponents
 
   def mount(%{"repo_name" => repo_name}, session, socket) do
     current_user = if session["user_id"] do
@@ -268,9 +269,7 @@ defmodule AiReviewerWeb.RepoDetailsLive do
                         </div>
                       </div>
                       <div class="p-4">
-                        <div class="font-mono text-sm whitespace-pre overflow-x-auto">
-                          <%= file["patch"] %>
-                        </div>
+                        <.format_diff diff={file["patch"]} />
                       </div>
                     </div>
                   <% end %>
