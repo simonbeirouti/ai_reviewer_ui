@@ -178,10 +178,24 @@ defmodule AiReviewerWeb.RepoTesterLive do
 
   # Helper function to generate test file path
   defp generate_test_file_path(file_path) do
-    # Convert lib/foo/bar.ex to test/foo/bar_test.exs
-    file_path
-    |> String.replace_prefix("lib/", "test/")
-    |> String.replace_suffix(".ex", "_test.exs")
+    # Handle different file path patterns
+    cond do
+      # If it's already a test file, keep it in the test directory
+      String.contains?(file_path, "/test/") ->
+        file_path
+
+      # If it's in lib directory, convert lib/foo/bar.ex to test/foo/bar_test.exs
+      String.starts_with?(file_path, "lib/") ->
+        file_path
+        |> String.replace_prefix("lib/", "test/")
+        |> String.replace_suffix(".ex", "_test.exs")
+
+      # For root directory files or any other files
+      true ->
+        filename = Path.basename(file_path)
+        base_name = Path.rootname(filename)
+        Path.join("test", "#{base_name}_test.exs")
+    end
   end
 
   # Helper function to extract module name from content
@@ -194,9 +208,29 @@ defmodule AiReviewerWeb.RepoTesterLive do
 
   # Helper function to create and commit test file
   defp create_and_commit_test_file(user, repo_name, test_file_path, content) do
+    # Add logging to verify the path
+    IO.puts("Creating/updating test file at path: #{test_file_path}")
+
     case user do
       %{github_token: token, name: username} ->
-        # First, try to get the current file (if it exists)
+        # Ensure test directory exists first
+        test_dir = Path.dirname(test_file_path)
+
+        # Try to create test directory if it doesn't exist
+        if test_dir != "." do
+          GithubService.create_file(
+            username,
+            repo_name,
+            "#{test_dir}/.keep",
+            %{
+              message: "Ensure test directory exists",
+              content: Base.encode64("")
+            },
+            token
+          )
+        end
+
+        # Now create/update the test file
         case GithubService.get_repository_contents(username, repo_name, token, test_file_path) do
           {:ok, file_data} when is_map(file_data) ->
             # File exists, update it
@@ -211,20 +245,7 @@ defmodule AiReviewerWeb.RepoTesterLive do
               },
               token
             )
-          {:ok, [file_data | _]} when is_map(file_data) ->
-            # List response, update first file
-            GithubService.update_file(
-              username,
-              repo_name,
-              test_file_path,
-              %{
-                message: "Update generated tests for #{test_file_path}",
-                content: Base.encode64(content),
-                sha: file_data["sha"]
-              },
-              token
-            )
-          {:error, _} ->
+          _ ->
             # File doesn't exist, create it
             GithubService.create_file(
               username,
