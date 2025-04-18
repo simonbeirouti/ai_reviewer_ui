@@ -279,4 +279,77 @@ defmodule AiReviewer.GithubService do
         {:error, "HTTP error: #{inspect(reason)}"}
     end
   end
+
+  @doc """
+  Gets the contents of a repository.
+  """
+  def get_repository_contents(owner, repo, access_token, path \\ "") do
+    url = "/repos/#{owner}/#{repo}/contents/#{path}"
+
+    case get(url, headers: [{"Authorization", "token #{access_token}"}]) do
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, body}
+      {:ok, %{status: status, body: body}} ->
+        {:error, "GitHub API error: #{status} - #{inspect(body)}"}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Creates a new file in a GitHub repository.
+
+  ## Parameters
+    - owner: The repository owner's username
+    - repo: The repository name
+    - path: The path where to create the file
+    - params: A map containing:
+      - message: The commit message
+      - content: The Base64-encoded content of the file
+    - token: The GitHub access token
+  """
+  def create_file(owner, repo, path, params, token) do
+    url = "/repos/#{owner}/#{repo}/contents/#{path}"
+    client = Tesla.client([
+      {Tesla.Middleware.Headers, [{"Authorization", "Bearer #{token}"}]}
+    ])
+
+    case put(client, url, params) do
+      {:ok, %{status: status, body: body}} when status in 200..201 ->
+        {:ok, body}
+      {:ok, %{status: status, body: body}} ->
+        {:error, "Failed to create file. Status: #{status}, Body: #{inspect(body)}"}
+      {:error, reason} ->
+        {:error, "HTTP request failed: #{inspect(reason)}"}
+    end
+  end
+
+  @doc """
+  Updates an existing file in a GitHub repository.
+
+  ## Parameters
+    - owner: The repository owner's username
+    - repo: The repository name
+    - path: The path of the file to update
+    - params: A map containing:
+      - message: The commit message
+      - content: The Base64-encoded content of the file
+      - sha: The blob SHA of the file being replaced
+    - token: The GitHub access token
+  """
+  def update_file(owner, repo, path, params, token) do
+    url = "/repos/#{owner}/#{repo}/contents/#{path}"
+    client = Tesla.client([
+      {Tesla.Middleware.Headers, [{"Authorization", "Bearer #{token}"}]}
+    ])
+
+    case put(client, url, params) do
+      {:ok, %{status: status, body: body}} when status in 200..201 ->
+        {:ok, body}
+      {:ok, %{status: status, body: body}} ->
+        {:error, "Failed to update file. Status: #{status}, Body: #{inspect(body)}"}
+      {:error, reason} ->
+        {:error, "HTTP request failed: #{inspect(reason)}"}
+    end
+  end
 end

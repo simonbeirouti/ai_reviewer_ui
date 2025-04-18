@@ -7,6 +7,68 @@ defmodule AiReviewer.AiService do
   alias OpenaiEx.ChatMessage
 
   @doc """
+  Generates ExUnit tests for the given source code using OpenAI.
+  Returns the generated test code.
+  """
+  def generate_tests(source_code, file_path) do
+    # Initialize OpenAI client
+    openai = OpenaiEx.new(System.fetch_env!("LB_OPENAI_API_KEY"))
+    |> OpenaiEx.with_receive_timeout(45_000)
+
+    # Create chat completion request
+    chat_req = Chat.Completions.new(
+      model: "gpt-3.5-turbo",
+      messages: [
+        ChatMessage.system("""
+        You are an expert Elixir developer specializing in writing comprehensive test suites.
+        You analyze code and create thorough ExUnit tests following best practices.
+        """),
+        ChatMessage.user("""
+        Generate comprehensive ExUnit tests for the following Elixir code.
+        Follow these guidelines:
+        1. Create tests for all public functions
+        2. Include doctests if the functions have documentation
+        3. Add appropriate test setup if needed
+        4. Test edge cases and error conditions
+        5. Follow Elixir testing best practices
+        6. Use descriptive test names
+        7. Group related tests using describe blocks
+        8. Add comments explaining complex test scenarios
+        9. Include any necessary test helpers
+        10. Ensure proper assertions are used
+
+        Source file: #{file_path}
+
+        Source code:
+        ```elixir
+        #{source_code}
+        ```
+
+        Generate a complete test file with appropriate test cases.
+        """)
+      ]
+    )
+
+    # Call OpenAI API
+    case Chat.Completions.create(openai, chat_req) do
+      {:ok, response} ->
+        content = response["choices"]
+        |> List.first()
+        |> Map.get("message")
+        |> Map.get("content")
+
+        # Extract the code block from the response if it exists
+        case Regex.run(~r/```elixir\s*([\s\S]*?)\s*```/, content) do
+          [_, code] -> {:ok, code}
+          nil -> {:ok, content}  # If no code block, use the entire response
+        end
+
+      {:error, error} ->
+        {:error, "OpenAI API error: #{inspect(error)}"}
+    end
+  end
+
+  @doc """
   Reviews code changes and suggests improvements based on anti-patterns and best practices.
   Returns the modified code with comments explaining the changes.
   """

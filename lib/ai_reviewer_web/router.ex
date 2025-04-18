@@ -28,15 +28,19 @@ defmodule AiReviewerWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    get "/login", AuthController, :login
+    get "/auth/github/callback", AuthController, :callback
+    get "/logout", AuthController, :logout
   end
 
-  scope "/", AiReviewerWeb do
+  scope "/dashboard", AiReviewerWeb do
     pipe_through [:browser, :auth]
 
-    get "/dashboard", PageController, :dashboard
-    live "/dashboard/repos", RepoSearchLive
-    live "/dashboard/repo/:repo_name", RepoDetailsLive
-    live "/dashboard/patterns", PatternsLive
+    get "/", DashboardController, :index
+    live "/repos", ReposLive
+    live "/repo/:repo_name", RepoRoleLive
+    live "/repo/:repo_name/reviewer", RepoDetailsLive
+    live "/repo/:repo_name/tester", RepoTesterLive
   end
 
   scope "/auth", AiReviewerWeb do

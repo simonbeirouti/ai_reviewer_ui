@@ -927,11 +927,17 @@ defmodule AiReviewerWeb.RepoDetailsLive do
 
       <!-- Add loading overlay -->
       <%= if @is_reviewing do %>
-        <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div class="bg-white p-8 rounded-lg shadow-lg flex flex-col items-center">
-            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
-            <p class="text-lg font-semibold">AI is reviewing your code...</p>
-            <p class="text-sm text-gray-500 mt-2">This may take a few moments</p>
+        <div class="fixed z-50 inset-0 overflow-y-auto">
+          <div class="fixed inset-0 flex items-center justify-center">
+            <!-- Background overlay -->
+            <div class="absolute inset-0 bg-gray-500 bg-opacity-75 transition-opacity"></div>
+            <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+              <div class="bg-white p-8 rounded-lg shadow-lg flex flex-col items-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+                <p class="text-lg font-semibold">AI is reviewing your code...</p>
+                <p class="text-sm text-gray-500 mt-2">This may take a few moments</p>
+              </div>
+            </div>
           </div>
         </div>
       <% end %>

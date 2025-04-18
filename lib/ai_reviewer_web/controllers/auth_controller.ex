@@ -18,7 +18,7 @@ defmodule AiReviewerWeb.AuthController do
         conn
         |> put_session(:user_id, user.id)
         |> put_flash(:info, "Successfully authenticated.")
-        |> redirect(to: ~p"/dashboard")
+        |> redirect(to: ~p"/dashboard/repos")
 
       {:error, _reason} ->
         conn
