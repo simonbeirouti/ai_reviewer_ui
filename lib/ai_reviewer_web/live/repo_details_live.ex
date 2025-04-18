@@ -641,93 +641,45 @@ defmodule AiReviewerWeb.RepoDetailsLive do
                               </div>
                             </div>
                             <div class="p-4">
-                              <!-- Code editor with line numbers -->
-                              <div class="overflow-x-auto text-sm font-mono">
-                                <table class="w-full border-collapse">
-                                  <tbody>
-                                    <%= for line <- @formatted_code.lines do %>
-                                      <tr id={line.id} class={"hover:bg-gray-100 #{if @selected_line == line.id, do: "bg-blue-50", else: ""}"}>
-                                        <td class="px-2 py-0.5 text-right text-gray-500 select-none border-r border-gray-200 bg-gray-50 w-[50px]">
-                                          <%= line.number %>
-                                        </td>
-                                        <%= if @editing_line == line.id do %>
-                                          <td class="px-0 py-0 whitespace-pre">
-                                            <div class="flex w-full">
-                                              <textarea
-                                                id="line-editor"
-                                                phx-keydown="handle_editor_keydown"
-                                                phx-blur="cancel_edit"
-                                                class="w-full font-mono text-sm p-2 border-2 border-blue-400 focus:border-blue-600 focus:outline-none"
-                                                style="min-height: 2.5em;"
-                                                phx-hook="FocusElement"
-                                                phx-update="ignore"
-                                              ><%= @edited_content %></textarea>
-                                            </div>
-                                            <div class="flex justify-end space-x-2 p-1 bg-gray-100">
-                                              <button
-                                                phx-click="save_edit"
-                                                phx-value-line={line.id}
-                                                class="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-                                              >
-                                                Save
-                                              </button>
-                                              <button
-                                                phx-click="cancel_edit"
-                                                class="px-2 py-1 text-xs bg-gray-600 text-white rounded hover:bg-gray-700"
-                                              >
-                                                Cancel
-                                              </button>
-                                            </div>
-                                          </td>
-                                        <% else %>
-                                          <td
-                                            class={"px-4 py-0.5 whitespace-pre #{if Map.has_key?(@file_changes, @selected_file) && Map.has_key?(@file_changes[@selected_file], line.id), do: "bg-yellow-50", else: ""}"}
-                                            phx-click="line_click"
-                                            phx-value-line={line.id}
-                                            phx-value-file={@selected_file}
-                                            style="cursor: pointer;"
-                                            title="Click to select line"
-                                          >
-                                            <%= line.content %>
-                                            <%= if Map.has_key?(@edit_suggestions, line.id) do %>
-                                              <div class="mt-1 p-1 bg-yellow-50 border-l-4 border-yellow-400 text-xs text-gray-800">
-                                                <div class="font-semibold">Suggestion:</div>
-                                                <div class="whitespace-pre-wrap"><%= @edit_suggestions[line.id] %></div>
-                                              </div>
-                                            <% end %>
-                                          </td>
-                                        <% end %>
-                                      </tr>
+                              <div class="overflow-x-auto text-sm font-mono relative">
+                                <div class="flex">
+                                  <!-- Line numbers -->
+                                  <div class="line-numbers select-none bg-gray-50 border-r border-gray-200 p-2 text-right text-gray-500" style="min-width: 50px; margin-top: -2px;">
+                                    <%= for idx <- 1..@formatted_code.count do %>
+                                      <div class="leading-5"><%= idx %></div>
                                     <% end %>
-                                  </tbody>
-                                </table>
-                              </div>
+                                  </div>
+                                  <!-- Code editor -->
+                                  <div class="flex-1 relative">
+                                    <textarea
+                                      id="code-editor"
+                                      class="w-full h-full font-mono text-sm p-2 border-0 focus:ring-0 focus:outline-none whitespace-pre"
+                                      style="min-height: 200px; resize: vertical; tab-size: 2;"
+                                      spellcheck="false"
+                                      phx-hook="CodeEditor"
+                                      phx-update="ignore"
+                                      phx-keyup="handle_code_change"
+                                      value={Enum.map_join(@formatted_code.lines, "\n", & &1.content)}
+                                    ><%= Enum.map_join(@formatted_code.lines, "\n", & &1.content) %></textarea>
+                                  </div>
+                                </div>
 
-                              <!-- Action buttons for selected line -->
-                              <%= if @selected_line && @editing_line != @selected_line do %>
+                                <!-- Action buttons -->
                                 <div class="sticky bottom-0 flex mt-2 space-x-2 p-2 bg-gray-100 border-t border-gray-200">
                                   <button
-                                    phx-click="start_edit"
-                                    phx-value-line={@selected_line}
-                                    class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
+                                    phx-click="save_changes"
+                                    class="px-3 py-1 text-sm bg-green-600 text-white rounded hover:bg-green-700"
                                   >
-                                    Edit Line
+                                    Save Changes
                                   </button>
                                   <button
-                                    phx-click="suggest_edit"
-                                    phx-value-line={@selected_line}
-                                    class="px-3 py-1 text-sm bg-purple-600 text-white rounded hover:bg-purple-700"
-                                  >
-                                    Suggest Improvement
-                                  </button>
-                                  <button
-                                    phx-click="deselect_line"
+                                    phx-click="discard_changes"
                                     class="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700"
                                   >
-                                    Cancel
+                                    Discard Changes
                                   </button>
                                 </div>
-                              <% end %>
+                              </div>
                             </div>
                           </div>
                         <% end %>
@@ -999,6 +951,46 @@ defmodule AiReviewerWeb.RepoDetailsLive do
     {:noreply, assign(socket,
       edit_suggestions: edit_suggestions,
       debug_info: "Added suggestion for line #{line_id}"
+    )}
+  end
+
+  # Handle code changes in the textarea
+  def handle_event("handle_code_change", %{"value" => content}, socket) do
+    # Split content into lines
+    lines = String.split(content, "\n")
+    line_count = length(lines)
+
+    # Create formatted lines structure
+    formatted_lines = Enum.with_index(lines, 1)
+    |> Enum.map(fn {line, idx} ->
+      %{
+        id: "L#{idx}",
+        number: "#{idx}",
+        content: line
+      }
+    end)
+
+    # Update the formatted code in socket assigns
+    {:noreply, assign(socket,
+      formatted_code: %{
+        lines: formatted_lines,
+        count: line_count
+      },
+      file_changes: Map.put(socket.assigns.file_changes, socket.assigns.selected_file, content)
+    )}
+  end
+
+  # Add handlers for save and discard changes
+  def handle_event("save_changes", _params, socket) do
+    # Here you would typically save the changes to the file
+    # For now, we'll just acknowledge the save
+    {:noreply, socket}
+  end
+
+  def handle_event("discard_changes", _params, socket) do
+    # Reset the file changes
+    {:noreply, assign(socket,
+      file_changes: Map.delete(socket.assigns.file_changes, socket.assigns.selected_file)
     )}
   end
 end
