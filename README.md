@@ -26,3 +26,12 @@ This application requires GitHub OAuth credentials for authentication. To set th
   * Docs: https://hexdocs.pm/phoenix
   * Forum: https://elixirforum.com/c/phoenix-forum
   * Source: https://github.com/phoenixframework/phoenix
+
+Postgres cluster ai-reviewer-db created
+  Username:    postgres
+  Password:    JIxFomTH781LuU0
+  Hostname:    ai-reviewer-db.internal
+  Flycast:     fdaa:0:82f7:0:1::9
+  Proxy port:  5432
+  Postgres port:  5433
+  Connection string: postgres://postgres:JIxFomTH781LuU0@ai-reviewer-db.flycast:5432
