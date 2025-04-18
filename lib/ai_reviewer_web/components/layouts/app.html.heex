@@ -11,11 +11,8 @@
     <div class="flex items-center gap-4 font-semibold leading-6 text-zinc-900">
       <%= if @current_user do %>
         <%= if String.starts_with?(@current_path, "/dashboard") do %>
-          <a href="/dashboard" class="flex items-center gap-2">
-            Dashboard
-          </a>
           <a href="/dashboard/repos" class="flex items-center gap-2">
-            Connect Repo
+            Repositories
           </a>
           <a href="/dashboard/patterns" class="flex items-center gap-2">
             Patterns
