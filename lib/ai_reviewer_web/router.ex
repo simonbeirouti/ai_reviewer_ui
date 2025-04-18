@@ -38,6 +38,7 @@ defmodule AiReviewerWeb.Router do
 
     get "/", DashboardController, :index
     live "/repos", ReposLive
+    live "/patterns", PatternsLive
     live "/repo/:repo_name", RepoRoleLive
     live "/repo/:repo_name/reviewer", RepoDetailsLive
     live "/repo/:repo_name/tester", RepoTesterLive
