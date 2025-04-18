@@ -802,12 +802,15 @@ defmodule AiReviewerWeb.RepoDetailsLive do
                                     <%= if @selected_file do %>
                                       <textarea
                                         id="code-editor"
-                                        class="w-full h-full font-mono text-sm p-2 border-0 focus:ring-0 focus:outline-none whitespace-pre"
+                                        class="w-full h-full font-mono text-sm p-2 border-0 focus:ring-0 focus:outline-none whitespace-pre overflow-y-hidden"
                                         style="min-height: 200px; resize: vertical; tab-size: 2;"
                                         spellcheck="false"
+                                        autocomplete="off"
+                                        autocorrect="off"
+                                        autocapitalize="off"
                                         phx-hook="CodeEditor"
                                         phx-update="ignore"
-                                        readonly
+                                        phx-change="handle_code_change"
                                       ><%= Map.get(@head_file_contents, @selected_file, "") %></textarea>
                                     <% else %>
                                       <div class="text-center p-8 text-gray-500">
