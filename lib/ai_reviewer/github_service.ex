@@ -57,20 +57,15 @@ defmodule AiReviewer.GithubService do
   end
 
   def get_pull_requests(owner, repo, access_token, state \\ "open") do
-    IO.inspect(state, label: "Fetching PRs with state")
     case get("/repos/#{owner}/#{repo}/pulls",
       query: [state: state, per_page: 100],
       headers: [{"Authorization", "token #{access_token}"}]
     ) do
       {:ok, %{status: 200, body: body}} ->
-        IO.inspect(length(body), label: "Number of PRs fetched")
-        IO.inspect(body, label: "PRs data")
         {:ok, body}
       {:ok, %{status: status, body: body}} ->
-        IO.inspect(body, label: "Error response")
         {:error, "GitHub API error: #{status} - #{inspect(body)}"}
       {:error, reason} ->
-        IO.inspect(reason, label: "Error")
         {:error, reason}
     end
   end
@@ -201,6 +196,87 @@ defmodule AiReviewer.GithubService do
       is_tuple(term) -> "tuple"
       is_map(term) -> "map"
       true -> "unknown"
+    end
+  end
+
+  @doc """
+  Commits a file change to a branch
+  """
+  def commit_file(username, repo, branch, path, content, message, token) do
+    url = "/repos/#{username}/#{repo}/contents/#{path}"
+
+    # First get the current file to get its SHA
+    case get_file_content(username, repo, path, branch, token) do
+      {:ok, current_content} ->
+        # Only commit if content has changed
+        if current_content != content do
+          client = Tesla.client([
+            {Tesla.Middleware.Headers, [{"Authorization", "Bearer #{token}"}]}
+          ])
+
+          body = %{
+            message: message,
+            content: Base.encode64(content),
+            sha: get_file_sha(username, repo, path, branch, token),
+            branch: branch
+          }
+
+          case put(client, url, body) do
+            {:ok, %{status: status}} when status in 200..201 ->
+              {:ok, "File committed successfully"}
+            {:ok, %{status: status, body: body}} ->
+              {:error, "GitHub API error: #{status} - #{inspect(body)}"}
+            {:error, reason} ->
+              {:error, "HTTP error: #{inspect(reason)}"}
+          end
+        else
+          {:ok, "No changes to commit"}
+        end
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Gets a file's SHA from GitHub
+  """
+  def get_file_sha(username, repo, path, branch, token) do
+    url = "/repos/#{username}/#{repo}/contents/#{path}"
+    client = Tesla.client([
+      {Tesla.Middleware.Headers, [{"Authorization", "Bearer #{token}"}]}
+    ])
+
+    case get(client, url, query: [ref: branch]) do
+      {:ok, %{status: 200, body: body}} ->
+        body["sha"]
+      _ ->
+        nil
+    end
+  end
+
+  @doc """
+  Creates a new pull request
+  """
+  def create_pull_request(username, repo, title, body, base, head, token) do
+    url = "/repos/#{username}/#{repo}/pulls"
+    client = Tesla.client([
+      {Tesla.Middleware.Headers, [{"Authorization", "Bearer #{token}"}]}
+    ])
+
+    pull_request_body = %{
+      title: title,
+      body: body,
+      head: head,
+      base: base
+    }
+
+    case post(client, url, pull_request_body) do
+      {:ok, %{status: status, body: response_body}} when status in 200..201 ->
+        {:ok, response_body["html_url"]}
+      {:ok, %{status: status, body: error_body}} ->
+        {:error, "GitHub API error: #{status} - #{inspect(error_body)}"}
+      {:error, reason} ->
+        {:error, "HTTP error: #{inspect(reason)}"}
     end
   end
 end
