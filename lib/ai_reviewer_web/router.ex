@@ -34,6 +34,8 @@ defmodule AiReviewerWeb.Router do
     pipe_through [:browser, :auth]
 
     get "/dashboard", PageController, :dashboard
+    live "/dashboard/repos", RepoSearchLive
+    live "/dashboard/repo/:repo_name", RepoDetailsLive
   end
 
   scope "/auth", AiReviewerWeb do

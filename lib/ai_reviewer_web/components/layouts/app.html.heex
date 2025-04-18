@@ -1,4 +1,4 @@
-<header class="px-4 sm:px-6 lg:px-8">
+<header class="px-4 sm:px-6 lg:px-8 h-16">
   <div class="flex items-center justify-between border-b border-zinc-100 py-3 text-sm">
     <div class="flex items-center gap-4">
       <a href="/">
@@ -10,8 +10,14 @@
     </div>
     <div class="flex items-center gap-4 font-semibold leading-6 text-zinc-900">
       <%= if @current_user do %>
-        <%= if @current_path == "/dashboard" do %>
-          <a href="/auth/logout" class="group relative w-64 flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+        <%= if String.starts_with?(@current_path, "/dashboard") do %>
+          <a href="/dashboard" class="flex items-center gap-2">
+            Dashboard
+          </a>
+          <a href="/dashboard/repos" class="flex items-center gap-2">
+            Connect Repo
+          </a>
+          <a href="/auth/logout" class="group relative w-32 flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
             Sign out
           </a>
         <% else %>
@@ -36,9 +42,7 @@
     </div>
   </div>
 </header>
-<main class="px-4 py-20 sm:px-6 lg:px-8">
-  <div class="mx-auto max-w-2xl">
-    <.flash_group flash={@flash} />
-    {@inner_content}
-  </div>
+<main>
+  <.flash_group flash={@flash} />
+  {@inner_content}
 </main>
